@@ -1,0 +1,65 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    env_file:
+      - ./.env
+    environment:
+      SECRET_KEY: ${SECRET_KEY}
+      DATABASE_URL: ${DATABASE_URL}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES}
+      JWT_ALGORITHM: ${JWT_ALGORITHM}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN}
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS}
+      FLAG_PARTS_REQUIRED: ${FLAG_PARTS_REQUIRED}
+      BOT_JWT_SECRET: ${BOT_JWT_SECRET}
+    volumes:
+      - planner_db:/data
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    networks:
+      - dev
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    env_file:
+      - ./.env
+    environment:
+      API_SECRET: ${API_SECRET}
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    depends_on:
+      backend:
+        condition: service_started
+    networks:
+      - dev
+
+  bot:
+    build:
+      context: ./bot
+    env_file:
+      - ./.env
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      BACKEND_API_BASE: ${BACKEND_API_BASE}
+      FRONTEND_BASE_URL: ${FRONTEND_BASE_URL}
+      REQUEST_TIMEOUT: ${REQUEST_TIMEOUT}
+      FLAG: ${FLAG}
+      BOT_JWT_SECRET: ${BOT_JWT_SECRET}
+    depends_on:
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+    networks:
+      - dev
+
+networks:
+  dev:
+    driver: bridge
+
+volumes:
+  planner_db:
